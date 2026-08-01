@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"golanggopherbot/internal/config"
 	"golanggopherbot/internal/domain"
 	gh "golanggopherbot/internal/github"
 )
@@ -55,5 +56,25 @@ func TestRepoRefreshKeepsGoLanguage(t *testing.T) {
 	p := repoProject(domain.Project{Language: "Go"}, gh.Repo{URL: "https://github.com/a/b", Language: "Rust", Topics: []string{"tool"}})
 	if p.Language != "Go" {
 		t.Fatalf("unexpected language: %s", p.Language)
+	}
+}
+
+func TestCatalogParams(t *testing.T) {
+	stars, contributors, offset, ok := catalogParams("50,1,6")
+	if !ok || stars != 50 || !contributors || offset != 6 {
+		t.Fatalf("unexpected params: %d %v %d %v", stars, contributors, offset, ok)
+	}
+	for _, value := range []string{"50,2,0", "-1,0,0", "x,0,0"} {
+		if _, _, _, ok := catalogParams(value); ok {
+			t.Fatalf("accepted invalid params %q", value)
+		}
+	}
+}
+
+func TestGroupMessageURL(t *testing.T) {
+	b := Bot{cfg: config.Config{ProjectsChatUsername: "@GolangGopher"}}
+	got := b.groupMessageURL(domain.Project{PublishedMessageID: 42})
+	if got != "https://t.me/GolangGopher/42" {
+		t.Fatalf("unexpected URL: %s", got)
 	}
 }

@@ -22,11 +22,11 @@ func TestUserAndProjectFlow(t *testing.T) {
 	if u.ID == 0 || u.Username != "gopher" {
 		t.Fatalf("unexpected user: %+v", u)
 	}
-	p, err := s.CreateProject(ctx, domain.Project{UserID: u.ID, Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b", AuthorDescription: "Описание автора", Topics: "golang,telegram-bot", WantsContributors: true})
+	p, err := s.CreateProject(ctx, domain.Project{UserID: u.ID, Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b", AuthorDescription: "Описание автора", Topics: "golang,telegram-bot", Stars: "12", WantsContributors: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := s.ListProjects(ctx, "Go", true, 5, 0)
+	items, err := s.ListProjects(ctx, 0, true, 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,10 +36,18 @@ func TestUserAndProjectFlow(t *testing.T) {
 	if items[0].AuthorDescription != "Описание автора" || items[0].Topics != "golang,telegram-bot" {
 		t.Fatalf("project metadata was not saved: %+v", items[0])
 	}
+	items, err = s.ListProjects(ctx, 10, false, 5, 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("star filter missed project: %+v %v", items, err)
+	}
+	items, err = s.ListProjects(ctx, 50, false, 5, 0)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("star filter included project: %+v %v", items, err)
+	}
 	if err := s.SetProjectStatus(ctx, p.ID, domain.StatusHidden); err != nil {
 		t.Fatal(err)
 	}
-	items, err = s.ListProjects(ctx, "", false, 5, 0)
+	items, err = s.ListProjects(ctx, 0, false, 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

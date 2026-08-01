@@ -219,14 +219,15 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 			return
 		}
 		b.publish(ctx, u, q, s)
-	case "filter":
-		b.showProjects(ctx, q.Message.Chat.ID, value, 0, q)
-	case "page":
-		vals := strings.Split(value, ",")
-		if len(vals) == 2 {
-			offset, _ := strconv.Atoi(vals[1])
-			b.showProjects(ctx, q.Message.Chat.ID, vals[0], offset, q)
+	case "stars":
+		b.contributorsFilter(q, value)
+	case "catalog":
+		minStars, contributors, offset, valid := catalogParams(value)
+		if valid {
+			b.showProjects(ctx, q.Message.Chat.ID, minStars, contributors, offset, q)
 		}
+	case "filters":
+		b.projectFiltersEdit(q)
 	case "manage":
 		b.showManageProject(ctx, u, q, value)
 	case "update":
@@ -274,49 +275,85 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 }
 
 func (b *Bot) projectFilters(chatID int64) {
-	rows := [][]tgbotapi.InlineKeyboardButton{{tgbotapi.NewInlineKeyboardButtonData("Все", "filter:all"), tgbotapi.NewInlineKeyboardButtonData("Ищут участников", "filter:contributors")}}
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.send(chatID, "Выбери фильтр каталога:", &kb)
+	kb := starsKeyboard()
+	b.send(chatID, "<b>Каталог проектов</b>\n\nСколько звёзд должно быть у репозитория?", kb)
 }
 
-func (b *Bot) showProjects(ctx context.Context, chatID int64, filter string, offset int, q *tgbotapi.CallbackQuery) {
-	lang := ""
-	contributors := false
-	if filter == "contributors" {
-		contributors = true
-	} else if filter != "all" {
-		lang = filter
+func starsKeyboard() *tgbotapi.InlineKeyboardMarkup {
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Любое", "stars:0"), tgbotapi.NewInlineKeyboardButtonData("⭐ 1+", "stars:1"), tgbotapi.NewInlineKeyboardButtonData("⭐ 10+", "stars:10")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⭐ 50+", "stars:50"), tgbotapi.NewInlineKeyboardButtonData("⭐ 100+", "stars:100"), tgbotapi.NewInlineKeyboardButtonData("⭐ 500+", "stars:500")),
+	)
+	return &kb
+}
+func (b *Bot) projectFiltersEdit(q *tgbotapi.CallbackQuery) {
+	b.edit(q, "<b>Каталог проектов</b>\n\nСколько звёзд должно быть у репозитория?", starsKeyboard())
+}
+func (b *Bot) contributorsFilter(q *tgbotapi.CallbackQuery, stars string) {
+	if _, err := strconv.Atoi(stars); err != nil {
+		return
 	}
-	items, err := b.store.ListProjects(ctx, lang, contributors, 5, offset)
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Все проекты", "catalog:"+stars+",0,0"), tgbotapi.NewInlineKeyboardButtonData("Нужны участники", "catalog:"+stars+",1,0")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Назад", "filters:menu")),
+	)
+	b.edit(q, "Показывать только проекты, которым нужны контрибьюторы?", &kb)
+}
+
+const catalogPageSize = 3
+
+func (b *Bot) showProjects(ctx context.Context, chatID int64, minStars int, contributors bool, offset int, q *tgbotapi.CallbackQuery) {
+	items, err := b.store.ListProjects(ctx, minStars, contributors, catalogPageSize+1, offset)
 	if err != nil {
 		b.logErr(err)
 		return
 	}
 	text := "Проекты не найдены."
+	hasNext := len(items) > catalogPageSize
+	if hasNext {
+		items = items[:catalogPageSize]
+	}
 	if len(items) > 0 {
 		var parts []string
 		for _, p := range items {
-			parts = append(parts, formatProject(p, ""))
+			parts = append(parts, b.formatCatalogProject(p))
 		}
 		text = strings.Join(parts, "\n\n──────────\n\n")
 	}
 	var row []tgbotapi.InlineKeyboardButton
+	flag := 0
+	if contributors {
+		flag = 1
+	}
 	if offset > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("← Назад", fmt.Sprintf("page:%s,%d", filter, max(0, offset-5))))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("←", fmt.Sprintf("catalog:%d,%d,%d", minStars, flag, max(0, offset-catalogPageSize))))
 	}
-	if len(items) == 5 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Дальше →", fmt.Sprintf("page:%s,%d", filter, offset+5)))
+	if hasNext {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("→", fmt.Sprintf("catalog:%d,%d,%d", minStars, flag, offset+catalogPageSize)))
 	}
-	var kb *tgbotapi.InlineKeyboardMarkup
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⚙️ Изменить фильтр", "filters:menu"))}
 	if len(row) > 0 {
-		k := tgbotapi.NewInlineKeyboardMarkup(row)
-		kb = &k
+		rows = append(rows, row)
 	}
+	k := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := &k
 	if q != nil {
 		b.edit(q, text, kb)
 	} else {
 		b.send(chatID, text, kb)
 	}
+}
+
+func catalogParams(value string) (int, bool, int, bool) {
+	parts := strings.Split(value, ",")
+	if len(parts) != 3 {
+		return 0, false, 0, false
+	}
+	stars, e1 := strconv.Atoi(parts[0])
+	flag, e2 := strconv.Atoi(parts[1])
+	offset, e3 := strconv.Atoi(parts[2])
+	valid := e1 == nil && e2 == nil && e3 == nil && stars >= 0 && (flag == 0 || flag == 1) && offset >= 0
+	return stars, flag == 1, offset, valid
 }
 
 func (b *Bot) publishMessage(text string) (tgbotapi.Message, error) {
@@ -637,6 +674,46 @@ func formatProject(p domain.Project, author string) string {
 	}
 	tags := topicHashtags(p.Topics)
 	return fmt.Sprintf("<b>%s</b>\nЯзык: %s · ⭐ %s\nКонтрибьюторы: %s%s\n\n%s\n\n<a href=\"%s\">Открыть репозиторий</a>\n%s", esc(p.Name), esc(p.Language), esc(p.Stars), yesNo(p.WantsContributors), a, esc(desc), html.EscapeString(p.RepoURL), tags)
+}
+
+func (b *Bot) formatCatalogProject(p domain.Project) string {
+	desc := p.AuthorDescription
+	if desc == "" {
+		desc = p.Description
+	}
+	if desc == "" {
+		desc = "Описание не указано."
+	}
+	desc = truncate(desc, 220)
+	links := fmt.Sprintf("<a href=\"%s\">GitHub</a>", html.EscapeString(p.RepoURL))
+	if groupURL := b.groupMessageURL(p); groupURL != "" {
+		links += " · <a href=\"" + html.EscapeString(groupURL) + "\">Сообщение в группе</a>"
+	}
+	return fmt.Sprintf("<b>%s</b> · ⭐ %s\n%s\n%s\n%s", esc(p.Name), esc(p.Stars), esc(desc), links, topicHashtags(p.Topics))
+}
+
+func (b *Bot) groupMessageURL(p domain.Project) string {
+	if p.PublishedMessageID == 0 {
+		return ""
+	}
+	username := strings.TrimPrefix(b.cfg.ProjectsChatUsername, "@")
+	if username != "" {
+		return fmt.Sprintf("https://t.me/%s/%d", username, p.PublishedMessageID)
+	}
+	chatID := strconv.FormatInt(p.PublishedChatID, 10)
+	chatID = strings.TrimPrefix(chatID, "-100")
+	if chatID == "" || chatID == "0" {
+		return ""
+	}
+	return fmt.Sprintf("https://t.me/c/%s/%d", chatID, p.PublishedMessageID)
+}
+
+func truncate(value string, limit int) string {
+	r := []rune(strings.TrimSpace(value))
+	if len(r) <= limit {
+		return string(r)
+	}
+	return string(r[:limit-1]) + "…"
 }
 
 func formatPublishedProject(p domain.Project, author, groupUsername string) string {

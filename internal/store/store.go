@@ -103,12 +103,12 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 	return err
 }
 
-func (s *Store) ListProjects(ctx context.Context, language string, contributorsOnly bool, limit, offset int) ([]domain.Project, error) {
+func (s *Store) ListProjects(ctx context.Context, minStars int, contributorsOnly bool, limit, offset int) ([]domain.Project, error) {
 	query := `SELECT id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at FROM projects WHERE status=?`
 	args := []any{domain.StatusPublished}
-	if language != "" {
-		query += ` AND language=?`
-		args = append(args, language)
+	if minStars > 0 {
+		query += ` AND CAST(stars AS INTEGER)>=?`
+		args = append(args, minStars)
 	}
 	if contributorsOnly {
 		query += ` AND wants_contributors=1`
