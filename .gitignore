@@ -1,0 +1,26 @@
+.env
+.env.local
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Go build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage
+coverage.out
+*.coverprofile
+
+# IDE files
+.DS_Store
+.idea/
+.vscode/
