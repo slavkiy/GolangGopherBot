@@ -95,14 +95,16 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 	switch m.Command() {
 	case "start":
-		b.send(m.Chat.ID, "Привет! Здесь можно добавить open-source проект сообщества и найти проекты для участия.\n\n/project  добавить проект\n/projects  смотреть проекты\n/cancel  отменить заполнение\n/help  помощь", nil)
+		b.send(m.Chat.ID, "Привет! Здесь можно добавить open-source проект сообщества и найти проекты для участия.\n\n/project  добавить проект\n/myprojects  мои проекты\n/projects  смотреть проекты\n/cancel  отменить заполнение\n/help  помощь", nil)
 	case "help":
-		b.send(m.Chat.ID, "Команды:\n/project  новый проект\n/projects  каталог и фильтры\n/cancel  отмена\n/admin  управление (для администраторов)", nil)
+		b.send(m.Chat.ID, "Команды:\n/project  новый проект\n/myprojects  управление моими проектами\n/projects  каталог и фильтры\n/cancel  отмена\n/admin  управление (для администраторов)", nil)
 	case "project":
 		b.sessions.set(u.TelegramID, session{Step: stepName})
 		b.send(m.Chat.ID, "Как называется проект? Отправь название (до 80 символов).", nil)
 	case "projects":
 		b.projectFilters(m.Chat.ID)
+	case "myprojects":
+		b.showMyProjects(ctx, u, m.Chat.ID, nil)
 	case "cancel":
 		b.sessions.delete(u.TelegramID)
 		b.send(m.Chat.ID, "Заполнение отменено.", nil)
@@ -154,6 +156,42 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		b.sessions.set(u.TelegramID, s)
 		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Да, ищу участников", "contributors:yes"), tgbotapi.NewInlineKeyboardButtonData("Нет", "contributors:no")))
 		b.send(m.Chat.ID, "Нужны ли проекту контрибьюторы?", &kb)
+	case stepEditDescription:
+		if len([]rune(text)) < 10 || len([]rune(text)) > 600 {
+			b.send(m.Chat.ID, "Описание должно быть от 10 до 600 символов.", nil)
+			return
+		}
+		if err := b.store.UpdateProjectDescription(ctx, s.ProjectID, u.ID, text); err != nil {
+			b.operationError(m.Chat.ID, err)
+			return
+		}
+		b.sessions.delete(u.TelegramID)
+		b.syncProjectMessage(ctx, u, s.ProjectID)
+		b.send(m.Chat.ID, "Описание обновлено.", nil)
+	case stepEditRepo:
+		b.send(m.Chat.ID, "Проверяю новый репозиторий…", nil)
+		repo, err := b.github.Fetch(ctx, text)
+		if err != nil {
+			b.send(m.Chat.ID, "Не получилось получить репозиторий: "+err.Error()+"\nОтправь другую ссылку.", nil)
+			return
+		}
+		current, err := b.store.ProjectForUser(ctx, s.ProjectID, u.ID)
+		if err != nil {
+			b.operationError(m.Chat.ID, err)
+			return
+		}
+		updated := repoProject(current, repo)
+		if err := b.store.UpdateProjectRepo(ctx, s.ProjectID, u.ID, updated); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE") {
+				b.send(m.Chat.ID, "Этот репозиторий уже привязан к другому проекту.", nil)
+			} else {
+				b.operationError(m.Chat.ID, err)
+			}
+			return
+		}
+		b.sessions.delete(u.TelegramID)
+		b.syncProjectMessage(ctx, u, s.ProjectID)
+		b.send(m.Chat.ID, "Ссылка и данные GitHub обновлены.", nil)
 	}
 }
 
@@ -201,6 +239,22 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 			offset, _ := strconv.Atoi(vals[1])
 			b.showProjects(ctx, q.Message.Chat.ID, vals[0], offset, q)
 		}
+	case "manage":
+		b.showManageProject(ctx, u, q, value)
+	case "update":
+		b.showUpdateMenu(ctx, u, q, value)
+	case "editdesc":
+		b.startProjectEdit(ctx, u, q, value, stepEditDescription, "Отправь новое описание проекта (от 10 до 600 символов).")
+	case "editrepo":
+		b.startProjectEdit(ctx, u, q, value, stepEditRepo, "Отправь новую публичную ссылку на GitHub-репозиторий.")
+	case "refresh":
+		b.refreshProject(ctx, u, q, value)
+	case "close":
+		b.confirmClose(ctx, u, q, value)
+	case "closeyes":
+		b.closeProject(ctx, u, q, value)
+	case "myprojects":
+		b.showMyProjects(ctx, u, q.Message.Chat.ID, q)
 	}
 }
 
@@ -301,6 +355,209 @@ func (b *Bot) publishMessage(text string) (tgbotapi.Message, error) {
 		return tgbotapi.Message{}, err
 	}
 	return message, nil
+}
+
+func (b *Bot) editPublishedMessage(p domain.Project, text string) error {
+	if p.PublishedChatID == 0 || p.PublishedMessageID == 0 {
+		return fmt.Errorf("у проекта нет опубликованного сообщения")
+	}
+	_, err := b.api.MakeRequest("editMessageText", tgbotapi.Params{
+		"chat_id": strconv.FormatInt(p.PublishedChatID, 10), "message_id": strconv.Itoa(p.PublishedMessageID),
+		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "false",
+	})
+	return err
+}
+
+func (b *Bot) showMyProjects(ctx context.Context, u domain.User, chatID int64, q *tgbotapi.CallbackQuery) {
+	projects, err := b.store.ListUserProjects(ctx, u.ID)
+	if err != nil {
+		b.logErr(err)
+		b.send(chatID, "Не удалось загрузить проекты.", nil)
+		return
+	}
+	if len(projects) == 0 {
+		if q != nil {
+			b.edit(q, "У тебя пока нет проектов. Добавить: /project", nil)
+		} else {
+			b.send(chatID, "У тебя пока нет проектов. Добавить: /project", nil)
+		}
+		return
+	}
+	var text strings.Builder
+	var rows [][]tgbotapi.InlineKeyboardButton
+	text.WriteString("<b>Мои проекты</b>\n")
+	for _, p := range projects {
+		status := "опубликован"
+		if p.Status == domain.StatusClosed {
+			status = "закрыт"
+		} else if p.Status != domain.StatusPublished {
+			status = "скрыт"
+		}
+		fmt.Fprintf(&text, "\n%d. %s — %s", p.ID, esc(p.Name), status)
+		if p.Status == domain.StatusPublished {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⚙️ "+shortButton(p.Name), fmt.Sprintf("manage:%d", p.ID))))
+		}
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	if q != nil {
+		b.edit(q, text.String(), &kb)
+	} else {
+		b.send(chatID, text.String(), &kb)
+	}
+}
+
+func (b *Bot) showManageProject(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект не найден или уже закрыт.", nil)
+		return
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("✏️ Обновить", fmt.Sprintf("update:%d", id)), tgbotapi.NewInlineKeyboardButtonData("🚫 Закрыть", fmt.Sprintf("close:%d", id))),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Мои проекты", "myprojects:list")),
+	)
+	b.edit(q, formatProject(p, ""), &kb)
+}
+
+func (b *Bot) showUpdateMenu(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект недоступен.", nil)
+		return
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Описание", fmt.Sprintf("editdesc:%d", id)), tgbotapi.NewInlineKeyboardButtonData("Ссылка", fmt.Sprintf("editrepo:%d", id))),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("↻ Взять данные из GitHub", fmt.Sprintf("refresh:%d", id))),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Назад", fmt.Sprintf("manage:%d", id))),
+	)
+	b.edit(q, "Что обновить в проекте <b>"+esc(p.Name)+"</b>?", &kb)
+}
+
+func (b *Bot) startProjectEdit(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string, next step, prompt string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект недоступен.", nil)
+		return
+	}
+	b.sessions.set(u.TelegramID, session{Step: next, ProjectID: id})
+	b.edit(q, prompt, nil)
+}
+
+func (b *Bot) refreshProject(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект недоступен.", nil)
+		return
+	}
+	repo, err := b.github.Fetch(ctx, p.RepoURL)
+	if err != nil {
+		b.edit(q, "Не удалось обновить данные GitHub: "+esc(err.Error()), nil)
+		return
+	}
+	if err = b.store.UpdateProjectRepo(ctx, id, u.ID, repoProject(p, repo)); err != nil {
+		b.edit(q, "Не удалось сохранить обновление.", nil)
+		b.logErr(err)
+		return
+	}
+	b.syncProjectMessage(ctx, u, id)
+	b.edit(q, "Данные GitHub и сообщение проекта обновлены.", nil)
+}
+
+func (b *Bot) confirmClose(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект недоступен.", nil)
+		return
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Да, закрыть", fmt.Sprintf("closeyes:%d", id)), tgbotapi.NewInlineKeyboardButtonData("Отмена", fmt.Sprintf("manage:%d", id))))
+	b.edit(q, "Закрыть проект <b>"+esc(p.Name)+"</b>? Он исчезнет из каталога, а публикация останется с отметкой о закрытии.", &kb)
+}
+
+func (b *Bot) closeProject(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, value string) {
+	id, ok := projectID(value)
+	if !ok {
+		return
+	}
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil || p.Status != domain.StatusPublished {
+		b.edit(q, "Проект недоступен.", nil)
+		return
+	}
+	if err = b.store.CloseProject(ctx, id, u.ID); err != nil {
+		b.edit(q, "Не удалось закрыть проект.", nil)
+		b.logErr(err)
+		return
+	}
+	closed := fmt.Sprintf("<b>%s</b> закрыт по решению автора.", esc(p.Name))
+	if err = b.editPublishedMessage(p, closed); err != nil {
+		b.logErr(err)
+		b.edit(q, "Проект закрыт в каталоге, но сообщение в группе обновить не удалось.", nil)
+		return
+	}
+	b.edit(q, "Проект закрыт и скрыт из каталога.", nil)
+}
+
+func (b *Bot) syncProjectMessage(ctx context.Context, u domain.User, id int64) {
+	p, err := b.store.ProjectForUser(ctx, id, u.ID)
+	if err != nil {
+		b.logErr(err)
+		return
+	}
+	author := "@" + u.Username
+	if u.Username == "" {
+		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
+	}
+	if err = b.editPublishedMessage(p, formatPublishedProject(p, author, b.cfg.ProjectsChatUsername)); err != nil {
+		b.logErr(err)
+	}
+}
+
+func repoProject(current domain.Project, repo gh.Repo) domain.Project {
+	current.RepoURL, current.RepoOwner, current.RepoName, current.Description = repo.URL, repo.Owner, repo.Name, repo.Description
+	current.Topics, current.Stars = strings.Join(repo.Topics, ","), strconv.Itoa(repo.Stars)
+	if repo.Language != "" {
+		current.Language = repo.Language
+	}
+	return current
+}
+func projectID(value string) (int64, bool) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	return id, err == nil && id > 0
+}
+func shortButton(name string) string {
+	r := []rune(name)
+	if len(r) > 24 {
+		return string(r[:24]) + "…"
+	}
+	return name
+}
+func (b *Bot) operationError(chatID int64, err error) {
+	if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "unavailable") {
+		b.send(chatID, "Проект не найден или уже закрыт.", nil)
+		return
+	}
+	b.logErr(err)
+	b.send(chatID, "Не удалось обновить проект. Попробуй позже.", nil)
 }
 
 func (b *Bot) groupCommand(ctx context.Context, m *tgbotapi.Message) {
@@ -415,9 +672,11 @@ func formatProject(p domain.Project, author string) string {
 
 func formatPublishedProject(p domain.Project, author, groupUsername string) string {
 	card := formatProject(p, "")
-	group := strings.TrimPrefix(groupUsername, "@")
+	group := groupUsername
 	if group == "" {
-		group = "GolangGopher"
+		group = "@GolangGopher"
+	} else if !strings.HasPrefix(group, "@") {
+		group = "@" + group
 	}
 	if author == "" {
 		author = "участником сообщества"

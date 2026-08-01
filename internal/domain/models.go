@@ -24,4 +24,5 @@ type Project struct {
 const (
 	StatusPublished = "published"
 	StatusHidden    = "hidden"
+	StatusClosed    = "closed"
 )

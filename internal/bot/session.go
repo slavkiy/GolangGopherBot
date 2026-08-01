@@ -11,6 +11,8 @@ const (
 	stepRepo
 	stepContributors
 	stepConfirm
+	stepEditDescription
+	stepEditRepo
 )
 
 type session struct {
@@ -18,6 +20,7 @@ type session struct {
 	Name, Language, RepoURL, Owner, RepoName, RepoDescription, AuthorDescription, Topics string
 	Stars                                                                                int
 	WantsContributors                                                                    bool
+	ProjectID                                                                            int64
 }
 type sessions struct {
 	mu   sync.RWMutex

@@ -131,6 +131,61 @@ func (s *Store) ListProjects(ctx context.Context, language string, contributorsO
 	return out, rows.Err()
 }
 
+const projectColumns = `id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at`
+
+func scanProject(scanner interface{ Scan(...any) error }) (domain.Project, error) {
+	var p domain.Project
+	err := scanner.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.CreatedAt, &p.UpdatedAt)
+	return p, err
+}
+
+func (s *Store) ProjectForUser(ctx context.Context, projectID, userID int64) (domain.Project, error) {
+	return scanProject(s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM projects WHERE id=? AND user_id=?`, projectID, userID))
+}
+
+func (s *Store) ListUserProjects(ctx context.Context, userID int64) ([]domain.Project, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+projectColumns+` FROM projects WHERE user_id=? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
+func (s *Store) UpdateProjectDescription(ctx context.Context, projectID, userID int64, description string) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE projects SET author_description=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status=?`, description, projectID, userID, domain.StatusPublished))
+}
+
+func (s *Store) UpdateProjectRepo(ctx context.Context, projectID, userID int64, p domain.Project) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE projects SET repo_url=?,repo_owner=?,repo_name=?,description=?,topics=?,stars=?,language=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status=?`, p.RepoURL, p.RepoOwner, p.RepoName, p.Description, p.Topics, p.Stars, p.Language, projectID, userID, domain.StatusPublished))
+}
+
+func (s *Store) CloseProject(ctx context.Context, projectID, userID int64) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE projects SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status=?`, domain.StatusClosed, projectID, userID, domain.StatusPublished))
+}
+
+func requireChanged(result sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("project not found or unavailable")
+	}
+	return nil
+}
+
 func (s *Store) SetProjectStatus(ctx context.Context, id int64, status string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE projects SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, status, id)
 	if err != nil {

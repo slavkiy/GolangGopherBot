@@ -19,7 +19,7 @@ func TestFormatProjectEscapesHTML(t *testing.T) {
 func TestPublishedProjectHasAttributionAndTopics(t *testing.T) {
 	p := domain.Project{Name: "Tool", RepoURL: "https://github.com/a/b", Topics: "golang,open-source,cli tools"}
 	text := formatPublishedProject(p, "@author", "@GolangGopher")
-	for _, want := range []string{"#golang", "#open_source", "#cli_tools", "Проект добавлен в группу GolangGopher пользователем @author"} {
+	for _, want := range []string{"#golang", "#open_source", "#cli_tools", "Проект добавлен в группу @GolangGopher пользователем @author"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in %q", want, text)
 		}
@@ -36,5 +36,16 @@ func TestSessions(t *testing.T) {
 	s.delete(1)
 	if _, ok = s.get(1); ok {
 		t.Fatal("session was not deleted")
+	}
+}
+
+func TestProjectID(t *testing.T) {
+	if id, ok := projectID("42"); !ok || id != 42 {
+		t.Fatalf("unexpected id: %d %v", id, ok)
+	}
+	for _, value := range []string{"0", "-1", "abc"} {
+		if _, ok := projectID(value); ok {
+			t.Fatalf("accepted invalid id %q", value)
+		}
 	}
 }
