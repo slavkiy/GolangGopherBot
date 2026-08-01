@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"golanggopherbot/internal/domain"
+	gh "golanggopherbot/internal/github"
 )
 
 func TestFormatProjectEscapesHTML(t *testing.T) {
@@ -47,5 +48,12 @@ func TestProjectID(t *testing.T) {
 		if _, ok := projectID(value); ok {
 			t.Fatalf("accepted invalid id %q", value)
 		}
+	}
+}
+
+func TestRepoRefreshKeepsGoLanguage(t *testing.T) {
+	p := repoProject(domain.Project{Language: "Go"}, gh.Repo{URL: "https://github.com/a/b", Language: "Rust", Topics: []string{"tool"}})
+	if p.Language != "Go" {
+		t.Fatalf("unexpected language: %s", p.Language)
 	}
 }

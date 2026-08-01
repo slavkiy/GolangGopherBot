@@ -28,8 +28,6 @@ type Bot struct {
 	sessions *sessions
 }
 
-var languages = []string{"Go", "Python", "JavaScript", "TypeScript", "Rust", "Java", "C#", "C++", "Другое"}
-
 func New(cfg config.Config, s *store.Store) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.BotToken)
 	if err != nil {
@@ -137,9 +135,10 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			return
 		}
 		s.AuthorDescription = text
-		s.Step = stepLanguage
+		s.Language = "Go"
+		s.Step = stepRepo
 		b.sessions.set(u.TelegramID, s)
-		b.languageMenu(m.Chat.ID, "Выбери основной язык:", "lang:")
+		b.send(m.Chat.ID, "Теперь отправь публичную ссылку на GitHub-репозиторий.", nil)
 	case stepRepo:
 		b.send(m.Chat.ID, "Проверяю репозиторий…", nil)
 		repo, err := b.github.Fetch(ctx, text)
@@ -149,9 +148,6 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		}
 		s.RepoURL, s.Owner, s.RepoName, s.RepoDescription, s.Stars = repo.URL, repo.Owner, repo.Name, repo.Description, repo.Stars
 		s.Topics = strings.Join(repo.Topics, ",")
-		if s.Language == "Другое" && repo.Language != "" {
-			s.Language = repo.Language
-		}
 		s.Step = stepContributors
 		b.sessions.set(u.TelegramID, s)
 		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Да, ищу участников", "contributors:yes"), tgbotapi.NewInlineKeyboardButtonData("Нет", "contributors:no")))
@@ -204,14 +200,6 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 	action, value := parts[0], parts[1]
 	s, ok := b.sessions.get(u.TelegramID)
 	switch action {
-	case "lang":
-		if !ok || s.Step != stepLanguage {
-			return
-		}
-		s.Language = value
-		s.Step = stepRepo
-		b.sessions.set(u.TelegramID, s)
-		b.edit(q, "Теперь отправь публичную ссылку на GitHub-репозиторий.", nil)
 	case "contributors":
 		if !ok || s.Step != stepContributors {
 			return
@@ -287,13 +275,6 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 
 func (b *Bot) projectFilters(chatID int64) {
 	rows := [][]tgbotapi.InlineKeyboardButton{{tgbotapi.NewInlineKeyboardButtonData("Все", "filter:all"), tgbotapi.NewInlineKeyboardButtonData("Ищут участников", "filter:contributors")}}
-	for i := 0; i < len(languages); i += 3 {
-		var row []tgbotapi.InlineKeyboardButton
-		for j := i; j < i+3 && j < len(languages); j++ {
-			row = append(row, tgbotapi.NewInlineKeyboardButtonData(languages[j], "filter:"+languages[j]))
-		}
-		rows = append(rows, row)
-	}
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.send(chatID, "Выбери фильтр каталога:", &kb)
 }
@@ -345,7 +326,7 @@ func (b *Bot) publishMessage(text string) (tgbotapi.Message, error) {
 	}
 	response, err := b.api.MakeRequest("sendMessage", tgbotapi.Params{
 		"chat_id": chat, "message_thread_id": strconv.Itoa(b.cfg.ProjectsThreadID),
-		"text": text, "parse_mode": "HTML",
+		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "true",
 	})
 	if err != nil {
 		return tgbotapi.Message{}, err
@@ -363,7 +344,7 @@ func (b *Bot) editPublishedMessage(p domain.Project, text string) error {
 	}
 	_, err := b.api.MakeRequest("editMessageText", tgbotapi.Params{
 		"chat_id": strconv.FormatInt(p.PublishedChatID, 10), "message_id": strconv.Itoa(p.PublishedMessageID),
-		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "false",
+		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "true",
 	})
 	return err
 }
@@ -535,9 +516,7 @@ func (b *Bot) syncProjectMessage(ctx context.Context, u domain.User, id int64) {
 func repoProject(current domain.Project, repo gh.Repo) domain.Project {
 	current.RepoURL, current.RepoOwner, current.RepoName, current.Description = repo.URL, repo.Owner, repo.Name, repo.Description
 	current.Topics, current.Stars = strings.Join(repo.Topics, ","), strconv.Itoa(repo.Stars)
-	if repo.Language != "" {
-		current.Language = repo.Language
-	}
+	current.Language = "Go"
 	return current
 }
 func projectID(value string) (int64, bool) {
@@ -621,6 +600,7 @@ func (b *Bot) isAdmin(id int64) bool { _, ok := b.cfg.AdminIDs[id]; return ok }
 func (b *Bot) send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "HTML"
+	m.DisableWebPagePreview = true
 	if kb != nil {
 		m.ReplyMarkup = *kb
 	}
@@ -631,24 +611,13 @@ func (b *Bot) send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup)
 func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, text)
 	m.ParseMode = "HTML"
+	m.DisableWebPagePreview = true
 	if kb != nil {
 		m.ReplyMarkup = kb
 	}
 	if _, err := b.api.Send(m); err != nil {
 		b.logErr(err)
 	}
-}
-func (b *Bot) languageMenu(chatID int64, text, prefix string) {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	for i := 0; i < len(languages); i += 3 {
-		var row []tgbotapi.InlineKeyboardButton
-		for j := i; j < i+3 && j < len(languages); j++ {
-			row = append(row, tgbotapi.NewInlineKeyboardButtonData(languages[j], prefix+languages[j]))
-		}
-		rows = append(rows, row)
-	}
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.send(chatID, text, &kb)
 }
 func formatDraft(s session) string {
 	p := domain.Project{Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, Description: s.RepoDescription, AuthorDescription: s.AuthorDescription, Topics: s.Topics, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors}
