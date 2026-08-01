@@ -16,6 +16,16 @@ func TestFormatProjectEscapesHTML(t *testing.T) {
 	}
 }
 
+func TestPublishedProjectHasAttributionAndTopics(t *testing.T) {
+	p := domain.Project{Name: "Tool", RepoURL: "https://github.com/a/b", Topics: "golang,open-source,cli tools"}
+	text := formatPublishedProject(p, "@author", "@GolangGopher")
+	for _, want := range []string{"#golang", "#open_source", "#cli_tools", "Проект добавлен в группу GolangGopher пользователем @author"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %q", want, text)
+		}
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s := newSessions()
 	s.set(1, session{Step: stepName, Name: "one"})

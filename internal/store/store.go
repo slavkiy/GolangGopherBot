@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golanggopherbot/internal/domain"
 	_ "modernc.org/sqlite"
@@ -42,7 +43,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS projects (
  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
  name TEXT NOT NULL, language TEXT NOT NULL, repo_url TEXT NOT NULL UNIQUE,
- repo_owner TEXT NOT NULL DEFAULT '', repo_name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', stars TEXT NOT NULL DEFAULT '0',
+ repo_owner TEXT NOT NULL DEFAULT '', repo_name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+ author_description TEXT NOT NULL DEFAULT '', topics TEXT NOT NULL DEFAULT '', stars TEXT NOT NULL DEFAULT '0',
  wants_contributors INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'published',
  published_chat_id INTEGER NOT NULL DEFAULT 0, published_message_id INTEGER NOT NULL DEFAULT 0,
  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -50,7 +52,19 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, status);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Миграция уже созданных баз до появления описания автора и тем GitHub.
+	for _, statement := range []string{
+		`ALTER TABLE projects ADD COLUMN author_description TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN topics TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, alterErr := s.db.Exec(statement); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
+			return alterErr
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpsertUser(ctx context.Context, u domain.User) (domain.User, error) {
@@ -70,7 +84,7 @@ func (s *Store) UserByTelegramID(ctx context.Context, id int64) (domain.User, er
 }
 
 func (s *Store) CreateProject(ctx context.Context, p domain.Project) (domain.Project, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO projects(user_id,name,language,repo_url,repo_owner,repo_name,description,stars,wants_contributors,status) VALUES(?,?,?,?,?,?,?,?,?,?)`, p.UserID, p.Name, p.Language, p.RepoURL, p.RepoOwner, p.RepoName, p.Description, p.Stars, p.WantsContributors, domain.StatusPublished)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO projects(user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.UserID, p.Name, p.Language, p.RepoURL, p.RepoOwner, p.RepoName, p.Description, p.AuthorDescription, p.Topics, p.Stars, p.WantsContributors, domain.StatusPublished)
 	if err != nil {
 		return domain.Project{}, err
 	}
@@ -90,7 +104,7 @@ func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 }
 
 func (s *Store) ListProjects(ctx context.Context, language string, contributorsOnly bool, limit, offset int) ([]domain.Project, error) {
-	query := `SELECT id,user_id,name,language,repo_url,repo_owner,repo_name,description,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at FROM projects WHERE status=?`
+	query := `SELECT id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at FROM projects WHERE status=?`
 	args := []any{domain.StatusPublished}
 	if language != "" {
 		query += ` AND language=?`
@@ -109,7 +123,7 @@ func (s *Store) ListProjects(ctx context.Context, language string, contributorsO
 	var out []domain.Project
 	for rows.Next() {
 		var p domain.Project
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

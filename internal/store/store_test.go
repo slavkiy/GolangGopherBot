@@ -22,7 +22,7 @@ func TestUserAndProjectFlow(t *testing.T) {
 	if u.ID == 0 || u.Username != "gopher" {
 		t.Fatalf("unexpected user: %+v", u)
 	}
-	p, err := s.CreateProject(ctx, domain.Project{UserID: u.ID, Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b", WantsContributors: true})
+	p, err := s.CreateProject(ctx, domain.Project{UserID: u.ID, Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b", AuthorDescription: "Описание автора", Topics: "golang,telegram-bot", WantsContributors: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +32,9 @@ func TestUserAndProjectFlow(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != p.ID {
 		t.Fatalf("unexpected projects: %+v", items)
+	}
+	if items[0].AuthorDescription != "Описание автора" || items[0].Topics != "golang,telegram-bot" {
+		t.Fatalf("project metadata was not saved: %+v", items[0])
 	}
 	if err := s.SetProjectStatus(ctx, p.ID, domain.StatusHidden); err != nil {
 		t.Fatal(err)

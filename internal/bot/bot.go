@@ -10,12 +10,14 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"unicode"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"golanggopherbot/internal/config"
 	"golanggopherbot/internal/domain"
 	gh "golanggopherbot/internal/github"
 	"golanggopherbot/internal/store"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type Bot struct {
@@ -93,9 +95,9 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 	switch m.Command() {
 	case "start":
-		b.send(m.Chat.ID, "Привет! Здесь можно добавить open-source проект сообщества и найти проекты для участия.\n\n/project — добавить проект\n/projects — смотреть проекты\n/cancel — отменить заполнение\n/help — помощь", nil)
+		b.send(m.Chat.ID, "Привет! Здесь можно добавить open-source проект сообщества и найти проекты для участия.\n\n/project  добавить проект\n/projects  смотреть проекты\n/cancel  отменить заполнение\n/help  помощь", nil)
 	case "help":
-		b.send(m.Chat.ID, "Команды:\n/project — новый проект\n/projects — каталог и фильтры\n/cancel — отмена\n/admin — управление (для администраторов)", nil)
+		b.send(m.Chat.ID, "Команды:\n/project  новый проект\n/projects  каталог и фильтры\n/cancel  отмена\n/admin  управление (для администраторов)", nil)
 	case "project":
 		b.sessions.set(u.TelegramID, session{Step: stepName})
 		b.send(m.Chat.ID, "Как называется проект? Отправь название (до 80 символов).", nil)
@@ -124,6 +126,15 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			return
 		}
 		s.Name = text
+		s.Step = stepDescription
+		b.sessions.set(u.TelegramID, s)
+		b.send(m.Chat.ID, "Добавь описание проекта: что он делает и чем может быть полезен (до 600 символов).", nil)
+	case stepDescription:
+		if len([]rune(text)) < 10 || len([]rune(text)) > 600 {
+			b.send(m.Chat.ID, "Описание должно быть от 10 до 600 символов.", nil)
+			return
+		}
+		s.AuthorDescription = text
 		s.Step = stepLanguage
 		b.sessions.set(u.TelegramID, s)
 		b.languageMenu(m.Chat.ID, "Выбери основной язык:", "lang:")
@@ -134,7 +145,8 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			b.send(m.Chat.ID, "Не получилось получить репозиторий: "+err.Error()+"\nОтправь другую ссылку.", nil)
 			return
 		}
-		s.RepoURL, s.Owner, s.RepoName, s.Description, s.Stars = repo.URL, repo.Owner, repo.Name, repo.Description, repo.Stars
+		s.RepoURL, s.Owner, s.RepoName, s.RepoDescription, s.Stars = repo.URL, repo.Owner, repo.Name, repo.Description, repo.Stars
+		s.Topics = strings.Join(repo.Topics, ",")
 		if s.Language == "Другое" && repo.Language != "" {
 			s.Language = repo.Language
 		}
@@ -193,7 +205,7 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 }
 
 func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, s session) {
-	p, err := b.store.CreateProject(ctx, domain.Project{UserID: u.ID, Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, RepoOwner: s.Owner, RepoName: s.RepoName, Description: s.Description, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors})
+	p, err := b.store.CreateProject(ctx, domain.Project{UserID: u.ID, Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, RepoOwner: s.Owner, RepoName: s.RepoName, Description: s.RepoDescription, AuthorDescription: s.AuthorDescription, Topics: s.Topics, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			b.edit(q, "Этот репозиторий уже есть в каталоге.", nil)
@@ -203,7 +215,11 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 		}
 		return
 	}
-	sent, err := b.publishMessage(formatProject(p, "@"+u.Username))
+	author := "@" + u.Username
+	if u.Username == "" {
+		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
+	}
+	sent, err := b.publishMessage(formatPublishedProject(p, author, b.cfg.ProjectsChatUsername))
 	if err != nil {
 		_ = b.store.DeleteProject(ctx, p.ID)
 		b.logErr(err)
@@ -378,10 +394,14 @@ func (b *Bot) languageMenu(chatID int64, text, prefix string) {
 	b.send(chatID, text, &kb)
 }
 func formatDraft(s session) string {
-	return fmt.Sprintf("<b>%s</b>\nЯзык: %s\n⭐ %d\nКонтрибьюторы: %s\n%s\n\n%s", esc(s.Name), esc(s.Language), s.Stars, yesNo(s.WantsContributors), esc(s.Description), esc(s.RepoURL))
+	p := domain.Project{Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, Description: s.RepoDescription, AuthorDescription: s.AuthorDescription, Topics: s.Topics, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors}
+	return formatProject(p, "")
 }
 func formatProject(p domain.Project, author string) string {
-	desc := p.Description
+	desc := p.AuthorDescription
+	if desc == "" {
+		desc = p.Description
+	}
 	if desc == "" {
 		desc = "Описание в репозитории не указано."
 	}
@@ -389,7 +409,41 @@ func formatProject(p domain.Project, author string) string {
 	if author != "" && author != "@" {
 		a = "\nАвтор: " + esc(author)
 	}
-	return fmt.Sprintf("<b>%s</b>\nЯзык: %s · ⭐ %s\nКонтрибьюторы: %s%s\n\n%s\n\n<a href=\"%s\">Открыть репозиторий</a>\n#проект", esc(p.Name), esc(p.Language), esc(p.Stars), yesNo(p.WantsContributors), a, esc(desc), html.EscapeString(p.RepoURL))
+	tags := topicHashtags(p.Topics)
+	return fmt.Sprintf("<b>%s</b>\nЯзык: %s · ⭐ %s\nКонтрибьюторы: %s%s\n\n%s\n\n<a href=\"%s\">Открыть репозиторий</a>\n%s", esc(p.Name), esc(p.Language), esc(p.Stars), yesNo(p.WantsContributors), a, esc(desc), html.EscapeString(p.RepoURL), tags)
+}
+
+func formatPublishedProject(p domain.Project, author, groupUsername string) string {
+	card := formatProject(p, "")
+	group := strings.TrimPrefix(groupUsername, "@")
+	if group == "" {
+		group = "GolangGopher"
+	}
+	if author == "" {
+		author = "участником сообщества"
+	}
+	return fmt.Sprintf("%s\n\n<i>Проект добавлен в группу %s пользователем %s</i>", card, esc(group), esc(author))
+}
+
+func topicHashtags(topics string) string {
+	result := []string{"#проект"}
+	for _, topic := range strings.Split(topics, ",") {
+		var clean []rune
+		for _, r := range strings.TrimSpace(topic) {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+				clean = append(clean, r)
+			} else if r == '-' || unicode.IsSpace(r) {
+				clean = append(clean, '_')
+			}
+		}
+		if len(clean) > 0 {
+			result = append(result, "#"+string(clean))
+		}
+		if len(result) == 11 {
+			break
+		}
+	}
+	return strings.Join(result, " ")
 }
 func yesNo(v bool) string {
 	if v {

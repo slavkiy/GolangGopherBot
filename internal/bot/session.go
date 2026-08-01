@@ -6,6 +6,7 @@ type step uint8
 
 const (
 	stepName step = iota + 1
+	stepDescription
 	stepLanguage
 	stepRepo
 	stepContributors
@@ -13,10 +14,10 @@ const (
 )
 
 type session struct {
-	Step                                                  step
-	Name, Language, RepoURL, Owner, RepoName, Description string
-	Stars                                                 int
-	WantsContributors                                     bool
+	Step                                                                                 step
+	Name, Language, RepoURL, Owner, RepoName, RepoDescription, AuthorDescription, Topics string
+	Stars                                                                                int
+	WantsContributors                                                                    bool
 }
 type sessions struct {
 	mu   sync.RWMutex

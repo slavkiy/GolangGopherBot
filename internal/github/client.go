@@ -14,6 +14,7 @@ type Repo struct {
 	URL, Owner, Name, Description string
 	Stars                         int
 	Language                      string
+	Topics                        []string
 }
 type Client struct {
 	http  *http.Client
@@ -55,10 +56,11 @@ func (c *Client) Fetch(ctx context.Context, raw string) (Repo, error) {
 		return Repo{}, fmt.Errorf("GitHub вернул код %d", resp.StatusCode)
 	}
 	var data struct {
-		HTMLURL         string  `json:"html_url"`
-		Language        string  `json:"language"`
-		Description     *string `json:"description"`
-		StargazersCount int     `json:"stargazers_count"`
+		HTMLURL         string   `json:"html_url"`
+		Language        string   `json:"language"`
+		Description     *string  `json:"description"`
+		StargazersCount int      `json:"stargazers_count"`
+		Topics          []string `json:"topics"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return Repo{}, err
@@ -67,5 +69,5 @@ func (c *Client) Fetch(ctx context.Context, raw string) (Repo, error) {
 	if data.Description != nil {
 		description = *data.Description
 	}
-	return Repo{URL: data.HTMLURL, Owner: owner, Name: name, Description: description, Stars: data.StargazersCount, Language: data.Language}, nil
+	return Repo{URL: data.HTMLURL, Owner: owner, Name: name, Description: description, Stars: data.StargazersCount, Language: data.Language, Topics: data.Topics}, nil
 }

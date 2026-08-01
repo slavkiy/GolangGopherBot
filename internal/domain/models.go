@@ -11,14 +11,14 @@ type User struct {
 }
 
 type Project struct {
-	ID                                                               int64
-	UserID                                                           int64
-	Name, Language, RepoURL, RepoOwner, RepoName, Description, Stars string
-	WantsContributors                                                bool
-	Status                                                           string
-	PublishedChatID                                                  int64
-	PublishedMessageID                                               int
-	CreatedAt, UpdatedAt                                             time.Time
+	ID                                                                                          int64
+	UserID                                                                                      int64
+	Name, Language, RepoURL, RepoOwner, RepoName, Description, AuthorDescription, Topics, Stars string
+	WantsContributors                                                                           bool
+	Status                                                                                      string
+	PublishedChatID                                                                             int64
+	PublishedMessageID                                                                          int
+	CreatedAt, UpdatedAt                                                                        time.Time
 }
 
 const (
