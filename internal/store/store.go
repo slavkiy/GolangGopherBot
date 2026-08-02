@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, status);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
-CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,spam_limit INTEGER NOT NULL DEFAULT 6,spam_window INTEGER NOT NULL DEFAULT 10,spam_action TEXT NOT NULL DEFAULT 'delete_warn',created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMEN
 		`ALTER TABLE users ADD COLUMN tags TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN warns INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN activity_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE network_groups ADD COLUMN spam_limit INTEGER NOT NULL DEFAULT 6`,
+		`ALTER TABLE network_groups ADD COLUMN spam_window INTEGER NOT NULL DEFAULT 10`,
+		`ALTER TABLE network_groups ADD COLUMN spam_action TEXT NOT NULL DEFAULT 'delete_warn'`,
 	} {
 		if _, alterErr := s.db.Exec(statement); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
@@ -240,17 +243,18 @@ func (s *Store) UpsertNetworkGroup(ctx context.Context, g domain.NetworkGroup) e
 	}
 	defer tx.Rollback()
 	var antiSpam bool
-	_ = tx.QueryRowContext(ctx, `SELECT anti_spam FROM network_groups WHERE chat_id=? OR language=? LIMIT 1`, g.ChatID, g.Language).Scan(&antiSpam)
+	spamLimit, spamWindow, spamAction := 6, 10, "delete_warn"
+	_ = tx.QueryRowContext(ctx, `SELECT anti_spam,spam_limit,spam_window,spam_action FROM network_groups WHERE chat_id=? OR language=? LIMIT 1`, g.ChatID, g.Language).Scan(&antiSpam, &spamLimit, &spamWindow, &spamAction)
 	if _, err = tx.ExecContext(ctx, `DELETE FROM network_groups WHERE chat_id=? OR language=?`, g.ChatID, g.Language); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO network_groups(name,language,chat_id,chat_username,thread_id,anti_spam) VALUES(?,?,?,?,?,?)`, g.Name, g.Language, g.ChatID, g.ChatUsername, g.ThreadID, antiSpam); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO network_groups(name,language,chat_id,chat_username,thread_id,anti_spam,spam_limit,spam_window,spam_action) VALUES(?,?,?,?,?,?,?,?,?)`, g.Name, g.Language, g.ChatID, g.ChatUsername, g.ThreadID, antiSpam, spamLimit, spamWindow, spamAction); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 func (s *Store) NetworkGroups(ctx context.Context) ([]domain.NetworkGroup, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups ORDER BY language`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam,spam_limit,spam_window,spam_action FROM network_groups ORDER BY language`)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +262,7 @@ func (s *Store) NetworkGroups(ctx context.Context) ([]domain.NetworkGroup, error
 	var out []domain.NetworkGroup
 	for rows.Next() {
 		var g domain.NetworkGroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam, &g.SpamLimit, &g.SpamWindow, &g.SpamAction); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -267,12 +271,12 @@ func (s *Store) NetworkGroups(ctx context.Context) ([]domain.NetworkGroup, error
 }
 func (s *Store) NetworkGroupForLanguage(ctx context.Context, language string) (domain.NetworkGroup, error) {
 	var g domain.NetworkGroup
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups WHERE language=?`, language).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam,spam_limit,spam_window,spam_action FROM network_groups WHERE language=?`, language).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam, &g.SpamLimit, &g.SpamWindow, &g.SpamAction)
 	return g, err
 }
 func (s *Store) NetworkGroupByChat(ctx context.Context, chatID int64) (domain.NetworkGroup, error) {
 	var g domain.NetworkGroup
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam,spam_limit,spam_window,spam_action FROM network_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam, &g.SpamLimit, &g.SpamWindow, &g.SpamAction)
 	return g, err
 }
 func (s *Store) RemoveNetworkGroup(ctx context.Context, id int64) error {
@@ -284,6 +288,15 @@ func (s *Store) ToggleAntiSpam(ctx context.Context, chatID int64) (bool, error) 
 	}
 	g, err := s.NetworkGroupByChat(ctx, chatID)
 	return g.AntiSpam, err
+}
+func (s *Store) SetAntiSpamLimit(ctx context.Context, chatID int64, limit int) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE network_groups SET spam_limit=? WHERE chat_id=?`, limit, chatID))
+}
+func (s *Store) SetAntiSpamWindow(ctx context.Context, chatID int64, seconds int) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE network_groups SET spam_window=? WHERE chat_id=?`, seconds, chatID))
+}
+func (s *Store) SetAntiSpamAction(ctx context.Context, chatID int64, action string) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE network_groups SET spam_action=? WHERE chat_id=?`, action, chatID))
 }
 func (s *Store) IncrementActivity(ctx context.Context, telegramID int64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET activity_count=activity_count+1 WHERE telegram_id=?`, telegramID)

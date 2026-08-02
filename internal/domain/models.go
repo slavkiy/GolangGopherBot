@@ -19,6 +19,9 @@ type NetworkGroup struct {
 	ChatUsername   string
 	ThreadID       int
 	AntiSpam       bool
+	SpamLimit      int
+	SpamWindow     int
+	SpamAction     string
 }
 type RegisteredGroup struct {
 	ID           int64

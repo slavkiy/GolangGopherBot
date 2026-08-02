@@ -402,15 +402,41 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		}
 	case "admantispam":
 		if b.canModerate(u) {
-			enabled, err := b.store.ToggleAntiSpam(ctx, q.Message.Chat.ID)
-			if err != nil {
-				b.edit(q, "Открой меню /admin внутри подключённой группы.", nil)
-			} else {
-				b.edit(q, fmt.Sprintf("Антиспам: %s", map[bool]string{true: "включён", false: "выключен"}[enabled]), b.adminBackKeyboard())
+			b.antiSpamMenu(ctx, q)
+		}
+	case "admcat":
+		if b.canModerate(u) {
+			b.adminCategory(u, q, value)
+		}
+	case "antitoggle":
+		if b.canModerate(u) {
+			_, _ = b.store.ToggleAntiSpam(ctx, q.Message.Chat.ID)
+			b.antiSpamMenu(ctx, q)
+		}
+	case "antilimit":
+		if b.canModerate(u) {
+			v, _ := strconv.Atoi(value)
+			if v == 3 || v == 6 || v == 10 || v == 15 {
+				_ = b.store.SetAntiSpamLimit(ctx, q.Message.Chat.ID, v)
 			}
+			b.antiSpamMenu(ctx, q)
+		}
+	case "antiwindow":
+		if b.canModerate(u) {
+			v, _ := strconv.Atoi(value)
+			if v == 5 || v == 10 || v == 30 || v == 60 {
+				_ = b.store.SetAntiSpamWindow(ctx, q.Message.Chat.ID, v)
+			}
+			b.antiSpamMenu(ctx, q)
+		}
+	case "antiaction":
+		if b.canModerate(u) && (value == "delete" || value == "delete_warn") {
+			_ = b.store.SetAntiSpamAction(ctx, q.Message.Chat.ID, value)
+			b.antiSpamMenu(ctx, q)
 		}
 	case "admmenu":
 		if b.canModerate(u) {
+			b.sessions.delete(u.TelegramID)
 			b.adminMenuEdit(ctx, u, q)
 		}
 	case "admsanction":
@@ -1080,15 +1106,50 @@ func (b *Bot) adminMenuEdit(ctx context.Context, u domain.User, q *tgbotapi.Call
 	b.edit(q, "<b>Управление сетью</b>", &kb)
 }
 func (b *Bot) adminKeyboard(u domain.User) tgbotapi.InlineKeyboardMarkup {
-	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Статистика", "admstats:show"), tgbotapi.NewInlineKeyboardButtonData("Антиспам", "admantispam:toggle"))}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admwarn:start"), tgbotapi.NewInlineKeyboardButtonData("Назначить теги", "admtag:start")))
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новая команда", "admcmd:start")))
-	if b.isOwner(u) {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Регистрация группы", "admregister:start"), tgbotapi.NewInlineKeyboardButtonData("Тема проектов", "admadd:start")))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назначить роль", "admrole:start"), tgbotapi.NewInlineKeyboardButtonData("Группы сети", "admgroup:list")))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Синхронизировать админов", "admsync:run"), tgbotapi.NewInlineKeyboardButtonData("Исключить группу", "admsanctionask:show")))
-	}
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Сеть", "admcat:network"), tgbotapi.NewInlineKeyboardButtonData("Модерация", "admcat:moderation")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Пользователи", "admcat:users"), tgbotapi.NewInlineKeyboardButtonData("Команды", "admcat:commands")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Статистика", "admstats:show"))}
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+func (b *Bot) adminCategory(u domain.User, q *tgbotapi.CallbackQuery, category string) {
+	back := tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show"))
+	var rows [][]tgbotapi.InlineKeyboardButton
+	title := ""
+	switch category {
+	case "network":
+		title = "Сеть"
+		if b.isOwner(u) {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Регистрация группы", "admregister:start"), tgbotapi.NewInlineKeyboardButtonData("Тема проектов", "admadd:start")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Группы сети", "admgroup:list"), tgbotapi.NewInlineKeyboardButtonData("Синхронизация админов", "admsync:run")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить группу", "admsanctionask:show")))
+		}
+	case "moderation":
+		title = "Модерация"
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Антиспам", "admantispam:show"), tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admwarn:start")))
+	case "users":
+		title = "Пользователи"
+		if b.isOwner(u) {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назначить роль", "admrole:start")))
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назначить теги", "admtag:start")))
+	case "commands":
+		title = "Команды"
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новая команда", "admcmd:start")))
+	default:
+		b.adminMenuEdit(context.Background(), u, q)
+		return
+	}
+	rows = append(rows, back)
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.edit(q, "<b>"+title+"</b>", &kb)
+}
+
+func (b *Bot) antiSpamMenu(ctx context.Context, q *tgbotapi.CallbackQuery) {
+	g, err := b.store.NetworkGroupByChat(ctx, q.Message.Chat.ID)
+	if err != nil {
+		b.edit(q, "Сначала зарегистрируй тему проектов этой группы.", b.adminBackKeyboard())
+		return
+	}
+	status := map[bool]string{true: "включён", false: "выключен"}[g.AntiSpam]
+	action := map[string]string{"delete": "удалять", "delete_warn": "удалять и добавлять варн"}[g.SpamAction]
+	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Включить / выключить", "antitoggle:run")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("3", "antilimit:3"), tgbotapi.NewInlineKeyboardButtonData("6", "antilimit:6"), tgbotapi.NewInlineKeyboardButtonData("10", "antilimit:10"), tgbotapi.NewInlineKeyboardButtonData("15", "antilimit:15")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("5 сек", "antiwindow:5"), tgbotapi.NewInlineKeyboardButtonData("10 сек", "antiwindow:10"), tgbotapi.NewInlineKeyboardButtonData("30 сек", "antiwindow:30"), tgbotapi.NewInlineKeyboardButtonData("60 сек", "antiwindow:60")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Только удалить", "antiaction:delete"), tgbotapi.NewInlineKeyboardButtonData("Удалить и варн", "antiaction:delete_warn")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:moderation")))
+	b.edit(q, fmt.Sprintf("<b>Антиспам</b>\nСтатус: %s\nЛимит: %d сообщений\nОкно: %d секунд\nДействие: %s", status, g.SpamLimit, g.SpamWindow, action), &kb)
 }
 func (b *Bot) startAdminSession(u domain.User, q *tgbotapi.CallbackQuery, next step, prompt string, needTopic bool) {
 	if q.Message.Chat.Type == "private" && next == stepAdminAddRoute {
@@ -1100,7 +1161,7 @@ func (b *Bot) startAdminSession(u domain.User, q *tgbotapi.CallbackQuery, next s
 		return
 	}
 	b.sessions.set(u.TelegramID, session{Step: next, AdminChatID: q.Message.Chat.ID, AdminThreadID: q.Message.MessageThreadID, AdminChatUsername: q.Message.Chat.UserName})
-	b.edit(q, prompt, nil)
+	b.edit(q, prompt, b.adminBackKeyboard())
 }
 func (b *Bot) registerGroupFromButton(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery) {
 	chat := q.Message.Chat
@@ -1215,22 +1276,30 @@ func (b *Bot) checkSpam(ctx context.Context, u domain.User, m *tgbotapi.Message)
 	}
 	key := fmt.Sprintf("%d:%d", m.Chat.ID, u.TelegramID)
 	now := time.Now()
+	if g.SpamLimit <= 0 {
+		g.SpamLimit = 6
+	}
+	if g.SpamWindow <= 0 {
+		g.SpamWindow = 10
+	}
 	b.spamMu.Lock()
 	recent := b.spam[key][:0]
 	for _, at := range b.spam[key] {
-		if now.Sub(at) < 10*time.Second {
+		if now.Sub(at) < time.Duration(g.SpamWindow)*time.Second {
 			recent = append(recent, at)
 		}
 	}
 	recent = append(recent, now)
 	b.spam[key] = recent
-	spam := len(recent) > 6
+	spam := len(recent) > g.SpamLimit
 	b.spamMu.Unlock()
 	if !spam {
 		return false
 	}
 	_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
-	_ = b.store.AddWarn(ctx, u.TelegramID)
+	if g.SpamAction == "delete_warn" {
+		_ = b.store.AddWarn(ctx, u.TelegramID)
+	}
 	return true
 }
 

@@ -153,6 +153,19 @@ func TestNetworkAdministration(t *testing.T) {
 	if err != nil || !enabled {
 		t.Fatalf("antispam not enabled: %v %v", enabled, err)
 	}
+	if err = s.SetAntiSpamLimit(ctx, -1001, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetAntiSpamWindow(ctx, -1001, 30); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetAntiSpamAction(ctx, -1001, "delete"); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := s.NetworkGroupByChat(ctx, -1001)
+	if err != nil || configured.SpamLimit != 10 || configured.SpamWindow != 30 || configured.SpamAction != "delete" {
+		t.Fatalf("unexpected antispam settings: %+v %v", configured, err)
+	}
 	u, err := s.UpsertUser(ctx, domain.User{TelegramID: 7})
 	if err != nil {
 		t.Fatal(err)
