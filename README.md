@@ -35,6 +35,17 @@ PROJECTS_THREAD_ID=5
 ADMIN_IDS=123456789,987654321
 ```
 
+Для сети языковых групп задайте маршруты JSON-массивом и единый канал:
+
+```env
+PROJECT_GROUPS_JSON=[{"language":"Go","chat_id":-1004494598650,"chat_username":"@GolangGopher","thread_id":5},{"language":"Python","chat_id":-1001234567890,"chat_username":"@PythonGroup","thread_id":5}]
+PROJECTS_CHANNEL_ID=-1009876543210
+PROJECTS_CHANNEL_USERNAME=@AllDevProjects
+```
+
+Каждый язык публикуется в своей теме `Ваши проекты`. Общий канал получает
+копию карточки со ссылкой на исходное сообщение языковой группы.
+
 `PROJECTS_CHAT_ID` — числовой ID супергруппы. Вместо него можно задать
 `PROJECTS_CHAT_USERNAME=@GolangGopher`, но числовой ID надёжнее. Бот должен быть
 добавлен в группу и иметь право отправлять сообщения в тему. `GITHUB_TOKEN`
