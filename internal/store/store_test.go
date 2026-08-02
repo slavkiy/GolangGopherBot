@@ -141,6 +141,14 @@ func TestNetworkAdministration(t *testing.T) {
 	if err != nil || len(groups) != 1 {
 		t.Fatalf("unexpected groups: %+v %v", groups, err)
 	}
+	g.Language = "Golang"
+	if err = s.UpsertNetworkGroup(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = s.NetworkGroups(ctx)
+	if err != nil || len(groups) != 1 || groups[0].Language != "Golang" {
+		t.Fatalf("group route was not replaced: %+v %v", groups, err)
+	}
 	enabled, err := s.ToggleAntiSpam(ctx, -1001)
 	if err != nil || !enabled {
 		t.Fatalf("antispam not enabled: %v %v", enabled, err)

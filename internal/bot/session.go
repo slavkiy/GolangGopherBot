@@ -13,7 +13,6 @@ const (
 	stepConfirm
 	stepEditDescription
 	stepEditRepo
-	stepAdminRegister
 	stepAdminAddRoute
 	stepAdminRole
 	stepAdminWarn

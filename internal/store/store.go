@@ -234,8 +234,20 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 }
 
 func (s *Store) UpsertNetworkGroup(ctx context.Context, g domain.NetworkGroup) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO network_groups(name,language,chat_id,chat_username,thread_id) VALUES(?,?,?,?,?) ON CONFLICT(language) DO UPDATE SET name=excluded.name,chat_id=excluded.chat_id,chat_username=excluded.chat_username,thread_id=excluded.thread_id`, g.Name, g.Language, g.ChatID, g.ChatUsername, g.ThreadID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var antiSpam bool
+	_ = tx.QueryRowContext(ctx, `SELECT anti_spam FROM network_groups WHERE chat_id=? OR language=? LIMIT 1`, g.ChatID, g.Language).Scan(&antiSpam)
+	if _, err = tx.ExecContext(ctx, `DELETE FROM network_groups WHERE chat_id=? OR language=?`, g.ChatID, g.Language); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO network_groups(name,language,chat_id,chat_username,thread_id,anti_spam) VALUES(?,?,?,?,?,?)`, g.Name, g.Language, g.ChatID, g.ChatUsername, g.ThreadID, antiSpam); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) NetworkGroups(ctx context.Context) ([]domain.NetworkGroup, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups ORDER BY language`)
