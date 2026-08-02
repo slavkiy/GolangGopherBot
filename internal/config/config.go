@@ -29,6 +29,7 @@ type Config struct {
 	GitHubToken     string
 	ProjectTargets  []ProjectTarget
 	ProjectsChannel PublishTarget
+	NetworkOwnerID  int64
 }
 
 func Load() (Config, error) {
@@ -38,6 +39,7 @@ func Load() (Config, error) {
 		AdminIDs: parseIDs(os.Getenv("ADMIN_IDS")), GitHubToken: os.Getenv("GITHUB_TOKEN"),
 	}
 	cfg.ProjectsChannel.ChatID, _ = strconv.ParseInt(os.Getenv("PROJECTS_CHANNEL_ID"), 10, 64)
+	cfg.NetworkOwnerID, _ = strconv.ParseInt(os.Getenv("NETWORK_OWNER_ID"), 10, 64)
 	cfg.ProjectsChannel.Username = os.Getenv("PROJECTS_CHANNEL_USERNAME")
 	if cfg.BotToken == "" {
 		return Config{}, fmt.Errorf("BOT_TOKEN is not set")
@@ -47,9 +49,7 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("PROJECT_GROUPS_JSON: %w", err)
 		}
 	}
-	if len(cfg.ProjectTargets) == 0 {
-		return Config{}, fmt.Errorf("PROJECT_GROUPS_JSON must contain at least one group")
-	}
+	// PROJECT_GROUPS_JSON используется только для первоначального наполнения БД.
 	seen := map[string]bool{}
 	for i := range cfg.ProjectTargets {
 		t := &cfg.ProjectTargets[i]

@@ -125,3 +125,48 @@ func TestOwnerCanUpdateAndCloseProject(t *testing.T) {
 		t.Fatal("closed project was updated")
 	}
 }
+
+func TestNetworkAdministration(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	g := domain.NetworkGroup{Name: "Gophers", Language: "Go", ChatID: -1001, ChatUsername: "@go", ThreadID: 5}
+	if err = s.UpsertNetworkGroup(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.NetworkGroups(ctx)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("unexpected groups: %+v %v", groups, err)
+	}
+	enabled, err := s.ToggleAntiSpam(ctx, -1001)
+	if err != nil || !enabled {
+		t.Fatalf("antispam not enabled: %v %v", enabled, err)
+	}
+	u, err := s.UpsertUser(ctx, domain.User{TelegramID: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetRole(ctx, 7, "moderator"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.AddWarn(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTags(ctx, 7, "trusted,go"); err != nil {
+		t.Fatal(err)
+	}
+	u, err = s.UserByTelegramID(ctx, 7)
+	if err != nil || u.Role != "moderator" || u.Warns != 1 || u.Tags != "trusted,go" {
+		t.Fatalf("unexpected user: %+v %v", u, err)
+	}
+	if err = s.SaveCustomCommand(ctx, "hello", "Привет, {name}", 7); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := s.CustomCommand(ctx, "hello")
+	if err != nil || cmd.Response != "Привет, {name}" {
+		t.Fatalf("unexpected command: %+v %v", cmd, err)
+	}
+}

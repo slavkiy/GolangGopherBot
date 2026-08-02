@@ -10,6 +10,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"golanggopherbot/internal/config"
@@ -17,7 +19,7 @@ import (
 	gh "golanggopherbot/internal/github"
 	"golanggopherbot/internal/store"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
 
 type Bot struct {
@@ -26,6 +28,8 @@ type Bot struct {
 	store    *store.Store
 	github   *gh.Client
 	sessions *sessions
+	spamMu   sync.Mutex
+	spam     map[string][]time.Time
 }
 
 func New(cfg config.Config, s *store.Store) (*Bot, error) {
@@ -33,7 +37,7 @@ func New(cfg config.Config, s *store.Store) (*Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), sessions: newSessions()}, nil
+	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), sessions: newSessions(), spam: make(map[string][]time.Time)}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -72,13 +76,18 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 	if u.IsBlocked {
 		return
 	}
+	_ = b.store.IncrementActivity(ctx, u.TelegramID)
+	u.ActivityCount++
 	if update.CallbackQuery != nil {
 		b.callback(ctx, u, update.CallbackQuery)
 		return
 	}
 	m := update.Message
 	if m.Chat.Type != "private" {
-		b.groupCommand(ctx, m)
+		if b.checkSpam(ctx, u, m) {
+			return
+		}
+		b.groupCommand(ctx, u, m)
 		return
 	}
 	if m.IsCommand() {
@@ -107,13 +116,17 @@ func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 		b.sessions.delete(u.TelegramID)
 		b.send(m.Chat.ID, "Заполнение отменено.", nil)
 	case "admin":
-		if b.isAdmin(u.TelegramID) {
-			b.adminHelp(m.Chat.ID)
+		if b.canModerate(u) {
+			b.adminMenu(ctx, u, m.Chat.ID)
 		} else {
 			b.send(m.Chat.ID, "Эта команда доступна только администраторам.", nil)
 		}
+	case "info":
+		b.showUserInfo(ctx, u, m.Chat.ID)
 	default:
-		b.send(m.Chat.ID, "Неизвестная команда. Открой /help.", nil)
+		if !b.runCustomCommand(ctx, m) {
+			b.send(m.Chat.ID, "Неизвестная команда. Открой /help.", nil)
+		}
 	}
 }
 
@@ -203,7 +216,7 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		if !ok || s.Step != stepLanguage {
 			return
 		}
-		if _, exists := b.cfg.TargetForLanguage(value); !exists {
+		if _, exists := b.targetForLanguage(ctx, value); !exists {
 			return
 		}
 		s.Language = value
@@ -254,6 +267,39 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		b.closeProject(ctx, u, q, value)
 	case "myprojects":
 		b.showMyProjects(ctx, u, q.Message.Chat.ID, q)
+	case "admstats":
+		if b.canModerate(u) {
+			x, e := b.store.Stats(ctx)
+			if e == nil {
+				b.edit(q, fmt.Sprintf("Пользователей: %d\nПроектов: %d\nИщут участников: %d", x.Users, x.Projects, x.Contributors), b.adminBackKeyboard())
+			}
+		}
+	case "admgroup":
+		if b.isOwner(u) {
+			b.adminGroups(ctx, q)
+		}
+	case "admdelgroup":
+		if b.isOwner(u) {
+			id, _ := strconv.ParseInt(value, 10, 64)
+			if err := b.store.RemoveNetworkGroup(ctx, id); err != nil {
+				b.edit(q, "Не удалось отключить группу.", b.adminBackKeyboard())
+			} else {
+				b.adminGroups(ctx, q)
+			}
+		}
+	case "admantispam":
+		if b.canModerate(u) {
+			enabled, err := b.store.ToggleAntiSpam(ctx, q.Message.Chat.ID)
+			if err != nil {
+				b.edit(q, "Открой меню /admin внутри подключённой группы.", nil)
+			} else {
+				b.edit(q, fmt.Sprintf("Антиспам: %s", map[bool]string{true: "включён", false: "выключен"}[enabled]), b.adminBackKeyboard())
+			}
+		}
+	case "admmenu":
+		if b.canModerate(u) {
+			b.adminMenuEdit(ctx, u, q)
+		}
 	}
 }
 
@@ -272,7 +318,7 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 	if u.Username == "" {
 		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
 	}
-	target, ok := b.cfg.TargetForLanguage(p.Language)
+	target, ok := b.targetForLanguage(ctx, p.Language)
 	if !ok {
 		b.edit(q, "Для этого языка не настроена группа.", nil)
 		_ = b.store.DeleteProject(ctx, p.ID)
@@ -608,7 +654,7 @@ func (b *Bot) syncProjectMessage(ctx context.Context, u domain.User, id int64) {
 	if u.Username == "" {
 		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
 	}
-	target, _ := b.cfg.TargetForLanguage(p.Language)
+	target, _ := b.targetForLanguage(ctx, p.Language)
 	if err = b.editPublishedMessage(p, formatPublishedProject(p, author, target.ChatUsername)); err != nil {
 		b.logErr(err)
 	}
@@ -651,12 +697,28 @@ func (b *Bot) operationError(chatID int64, err error) {
 	b.send(chatID, "Не удалось обновить проект. Попробуй позже.", nil)
 }
 
-func (b *Bot) groupCommand(ctx context.Context, m *tgbotapi.Message) {
-	if !m.IsCommand() || !b.isAdmin(m.From.ID) {
+func (b *Bot) groupCommand(ctx context.Context, u domain.User, m *tgbotapi.Message) {
+	if !m.IsCommand() {
+		return
+	}
+	if m.Command() == "admin" {
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
+		if !b.canModerate(u) {
+			return
+		}
+	}
+	if m.Command() == "info" {
+		b.showUserInfo(ctx, u, m.Chat.ID)
+		return
+	}
+	if !b.canModerate(u) {
+		b.runCustomCommand(ctx, m)
 		return
 	}
 	args := strings.Fields(m.CommandArguments())
 	switch m.Command() {
+	case "admin":
+		b.adminAction(ctx, u, m, args)
 	case "stats":
 		x, e := b.store.Stats(ctx)
 		if e == nil {
@@ -670,6 +732,8 @@ func (b *Bot) groupCommand(ctx context.Context, m *tgbotapi.Message) {
 		b.adminBlock(ctx, m, args, true)
 	case "unblock":
 		b.adminBlock(ctx, m, args, false)
+	default:
+		b.runCustomCommand(ctx, m)
 	}
 }
 
@@ -708,11 +772,218 @@ func (b *Bot) adminBlock(ctx context.Context, m *tgbotapi.Message, args []string
 func (b *Bot) adminHelp(chatID int64) {
 	b.send(chatID, "Админ-команды (работают и в группе):\n/stats\n/hideproject ID\n/showproject ID\n/block TELEGRAM_ID\n/unblock TELEGRAM_ID", nil)
 }
+func (b *Bot) canModerate(u domain.User) bool {
+	if b.isOwner(u) {
+		return true
+	}
+	if u.Role == "admin" || u.Role == "moderator" {
+		return true
+	}
+	_, ok := b.cfg.AdminIDs[u.TelegramID]
+	return ok
+}
+func (b *Bot) isOwner(u domain.User) bool {
+	return u.Role == "owner" || b.cfg.NetworkOwnerID != 0 && u.TelegramID == b.cfg.NetworkOwnerID
+}
 func (b *Bot) isAdmin(id int64) bool { _, ok := b.cfg.AdminIDs[id]; return ok }
+
+func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Message, args []string) {
+	if len(args) == 0 {
+		b.adminMenu(ctx, u, m.Chat.ID)
+		return
+	}
+	switch args[0] {
+	case "add":
+		if !b.isOwner(u) {
+			b.send(m.Chat.ID, "Только владелец сети может добавлять группы.", nil)
+			return
+		}
+		if len(args) != 3 || m.MessageThreadID == 0 {
+			b.send(m.Chat.ID, "Выполни команду в нужной теме: /admin add NAME LANG", nil)
+			return
+		}
+		g := domain.NetworkGroup{Name: args[1], Language: args[2], ChatID: m.Chat.ID, ChatUsername: m.Chat.UserName, ThreadID: m.MessageThreadID}
+		if err := b.store.UpsertNetworkGroup(ctx, g); err != nil {
+			b.send(m.Chat.ID, "Не удалось сохранить группу: "+esc(err.Error()), nil)
+		} else {
+			b.send(m.Chat.ID, "Группа и тема сохранены в сети.", nil)
+		}
+	case "antispam":
+		enabled, err := b.store.ToggleAntiSpam(ctx, m.Chat.ID)
+		if err != nil {
+			b.send(m.Chat.ID, "Сначала добавь группу в сеть.", nil)
+		} else {
+			b.send(m.Chat.ID, fmt.Sprintf("Антиспам: %s", map[bool]string{true: "включён", false: "выключен"}[enabled]), nil)
+		}
+	case "role":
+		if !b.isOwner(u) || len(args) != 3 {
+			b.send(m.Chat.ID, "Формат для владельца: /admin role USER_ID owner|admin|moderator|member", nil)
+			return
+		}
+		id, e := strconv.ParseInt(args[1], 10, 64)
+		valid := map[string]bool{"owner": true, "admin": true, "moderator": true, "member": true}
+		if e != nil || !valid[args[2]] {
+			b.send(m.Chat.ID, "Некорректный ID или роль.", nil)
+			return
+		}
+		if e = b.store.SetRole(ctx, id, args[2]); e != nil {
+			b.send(m.Chat.ID, "Пользователь сначала должен открыть бота.", nil)
+		} else {
+			b.send(m.Chat.ID, "Роль обновлена.", nil)
+		}
+	case "warn":
+		if len(args) != 2 {
+			return
+		}
+		id, _ := strconv.ParseInt(args[1], 10, 64)
+		if err := b.store.AddWarn(ctx, id); err != nil {
+			b.send(m.Chat.ID, "Пользователь не найден.", nil)
+		} else {
+			b.send(m.Chat.ID, "Варн добавлен.", nil)
+		}
+	case "tag":
+		if len(args) < 3 {
+			return
+		}
+		id, _ := strconv.ParseInt(args[1], 10, 64)
+		if err := b.store.SetTags(ctx, id, strings.Join(args[2:], ",")); err != nil {
+			b.send(m.Chat.ID, "Пользователь не найден.", nil)
+		} else {
+			b.send(m.Chat.ID, "Теги обновлены.", nil)
+		}
+	case "newcmd":
+		if len(args) < 3 {
+			b.send(m.Chat.ID, "Формат: /admin newcmd NAME ТЕКСТ. Переменные: {name}, {username}, {id}", nil)
+			return
+		}
+		name := strings.TrimPrefix(strings.ToLower(args[1]), "/")
+		if err := b.store.SaveCustomCommand(ctx, name, strings.Join(args[2:], " "), u.TelegramID); err != nil {
+			b.send(m.Chat.ID, "Не удалось сохранить команду.", nil)
+		} else {
+			b.send(m.Chat.ID, "Команда /"+esc(name)+" сохранена.", nil)
+		}
+	case "new":
+		if len(args) < 5 || args[1] != "cmd" || (args[3] != "reply" && args[3] != "ответ") {
+			b.send(m.Chat.ID, "Формат: /admin new cmd NAME reply ТЕКСТ", nil)
+			return
+		}
+		name := strings.TrimPrefix(strings.ToLower(args[2]), "/")
+		if err := b.store.SaveCustomCommand(ctx, name, strings.Join(args[4:], " "), u.TelegramID); err != nil {
+			b.send(m.Chat.ID, "Не удалось сохранить команду.", nil)
+		} else {
+			b.send(m.Chat.ID, "Команда /"+esc(name)+" сохранена.", nil)
+		}
+	default:
+		b.adminMenu(ctx, u, m.Chat.ID)
+	}
+}
+
+func (b *Bot) adminMenu(ctx context.Context, u domain.User, chatID int64) {
+	kb := b.adminKeyboard(u)
+	b.send(chatID, "<b>Управление сетью</b>\nКоманды не публикуются в меню BotFather.", &kb)
+}
+func (b *Bot) adminMenuEdit(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery) {
+	kb := b.adminKeyboard(u)
+	b.edit(q, "<b>Управление сетью</b>", &kb)
+}
+func (b *Bot) adminKeyboard(u domain.User) tgbotapi.InlineKeyboardMarkup {
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Статистика", "admstats:show"), tgbotapi.NewInlineKeyboardButtonData("Антиспам", "admantispam:toggle"))}
+	if b.isOwner(u) {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Группы сети", "admgroup:list")))
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+func (b *Bot) adminBackKeyboard() *tgbotapi.InlineKeyboardMarkup {
+	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
+	return &kb
+}
+func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
+	groups, err := b.store.NetworkGroups(ctx)
+	if err != nil {
+		return
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var text strings.Builder
+	text.WriteString("<b>Группы сети</b>\n")
+	for _, g := range groups {
+		fmt.Fprintf(&text, "\n%s: %s, тема %d", esc(g.Language), esc(g.Name), g.ThreadID)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отключить "+shortButton(g.Name), fmt.Sprintf("admdelgroup:%d", g.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.edit(q, text.String(), &kb)
+}
+func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64) {
+	count, _ := b.store.UserProjectCount(ctx, u.ID)
+	projects, _ := b.store.ListUserProjects(ctx, u.ID)
+	var names []string
+	for i, p := range projects {
+		if i == 5 {
+			break
+		}
+		names = append(names, p.Name)
+	}
+	projectNames := "нет"
+	if len(names) > 0 {
+		projectNames = strings.Join(names, ", ")
+	}
+	role := u.Role
+	if b.isOwner(u) {
+		role = "owner"
+	} else if _, ok := b.cfg.AdminIDs[u.TelegramID]; ok && role == "member" {
+		role = "admin"
+	}
+	tags := u.Tags
+	if tags == "" {
+		tags = "нет"
+	}
+	b.send(chatID, fmt.Sprintf("<b>Профиль сети</b>\nУровень: %s\nПроектов: %d (%s)\nАктивность: %d\nВарнов: %d\nТеги: %s", esc(role), count, esc(projectNames), u.ActivityCount, u.Warns, esc(tags)), nil)
+}
+func (b *Bot) runCustomCommand(ctx context.Context, m *tgbotapi.Message) bool {
+	if !m.IsCommand() {
+		return false
+	}
+	c, err := b.store.CustomCommand(ctx, strings.ToLower(m.Command()))
+	if err != nil {
+		return false
+	}
+	name := m.From.FirstName
+	if name == "" {
+		name = m.From.UserName
+	}
+	replacer := strings.NewReplacer("{name}", esc(name), "{username}", esc("@"+m.From.UserName), "{id}", strconv.FormatInt(m.From.ID, 10))
+	b.send(m.Chat.ID, replacer.Replace(c.Response), nil)
+	return true
+}
+func (b *Bot) checkSpam(ctx context.Context, u domain.User, m *tgbotapi.Message) bool {
+	g, err := b.store.NetworkGroupByChat(ctx, m.Chat.ID)
+	if err != nil || !g.AntiSpam || b.canModerate(u) {
+		return false
+	}
+	key := fmt.Sprintf("%d:%d", m.Chat.ID, u.TelegramID)
+	now := time.Now()
+	b.spamMu.Lock()
+	recent := b.spam[key][:0]
+	for _, at := range b.spam[key] {
+		if now.Sub(at) < 10*time.Second {
+			recent = append(recent, at)
+		}
+	}
+	recent = append(recent, now)
+	b.spam[key] = recent
+	spam := len(recent) > 6
+	b.spamMu.Unlock()
+	if !spam {
+		return false
+	}
+	_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
+	_ = b.store.AddWarn(ctx, u.TelegramID)
+	return true
+}
 func (b *Bot) send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "HTML"
-	m.DisableWebPagePreview = true
+	m.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
 	if kb != nil {
 		m.ReplyMarkup = *kb
 	}
@@ -723,7 +994,7 @@ func (b *Bot) send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup)
 func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, text)
 	m.ParseMode = "HTML"
-	m.DisableWebPagePreview = true
+	m.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
 	if kb != nil {
 		m.ReplyMarkup = kb
 	}
@@ -732,17 +1003,32 @@ func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKe
 	}
 }
 func (b *Bot) languageMenu(chatID int64) {
+	groups, err := b.store.NetworkGroups(context.Background())
+	if err != nil || len(groups) == 0 {
+		b.send(chatID, "Группы сети пока не настроены.", nil)
+		return
+	}
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for i := 0; i < len(b.cfg.ProjectTargets); i += 2 {
+	for i := 0; i < len(groups); i += 2 {
 		var row []tgbotapi.InlineKeyboardButton
-		for j := i; j < i+2 && j < len(b.cfg.ProjectTargets); j++ {
-			language := b.cfg.ProjectTargets[j].Language
+		for j := i; j < i+2 && j < len(groups); j++ {
+			language := groups[j].Language
 			row = append(row, tgbotapi.NewInlineKeyboardButtonData(language, "lang:"+language))
 		}
 		rows = append(rows, row)
 	}
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.send(chatID, "Выбери язык проекта. Он определяет группу для публикации:", &kb)
+}
+func (b *Bot) targetForLanguage(ctx context.Context, language string) (config.ProjectTarget, bool) {
+	if b.store == nil {
+		return b.cfg.TargetForLanguage(language)
+	}
+	g, err := b.store.NetworkGroupForLanguage(ctx, language)
+	if err != nil {
+		return config.ProjectTarget{}, false
+	}
+	return config.ProjectTarget{Language: g.Language, ChatID: g.ChatID, ChatUsername: g.ChatUsername, ThreadID: g.ThreadID}, true
 }
 func formatDraft(s session) string {
 	p := domain.Project{Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, Description: s.RepoDescription, AuthorDescription: s.AuthorDescription, Topics: s.Topics, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors}
@@ -784,7 +1070,7 @@ func (b *Bot) groupMessageURL(p domain.Project) string {
 	if p.PublishedMessageID == 0 {
 		return ""
 	}
-	target, _ := b.cfg.TargetForLanguage(p.Language)
+	target, _ := b.targetForLanguage(context.Background(), p.Language)
 	username := strings.TrimPrefix(target.ChatUsername, "@")
 	if username != "" {
 		return fmt.Sprintf("https://t.me/%s/%d", username, p.PublishedMessageID)

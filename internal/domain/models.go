@@ -7,8 +7,20 @@ type User struct {
 	TelegramID                                  int64
 	Username, FirstName, LastName, LanguageCode string
 	IsBlocked                                   bool
+	Role, Tags                                  string
+	Warns, ActivityCount                        int
 	CreatedAt, UpdatedAt                        time.Time
 }
+
+type NetworkGroup struct {
+	ID             int64
+	Name, Language string
+	ChatID         int64
+	ChatUsername   string
+	ThreadID       int
+	AntiSpam       bool
+}
+type CustomCommand struct{ Name, Response string }
 
 type Project struct {
 	ID                                                                                          int64

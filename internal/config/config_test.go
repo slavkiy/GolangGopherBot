@@ -2,11 +2,11 @@ package config
 
 import "testing"
 
-func TestLoadRequiresProjectGroupsJSON(t *testing.T) {
+func TestLoadAllowsEmptyProjectGroupsForDatabaseConfiguration(t *testing.T) {
 	t.Setenv("BOT_TOKEN", "test-token")
 	t.Setenv("PROJECT_GROUPS_JSON", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("empty project group settings were accepted")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
 	}
 }
 

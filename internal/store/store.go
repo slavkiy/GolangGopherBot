@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL UNIQUE,
  username TEXT NOT NULL DEFAULT '', first_name TEXT NOT NULL DEFAULT '', last_name TEXT NOT NULL DEFAULT '',
  language_code TEXT NOT NULL DEFAULT '', is_blocked INTEGER NOT NULL DEFAULT 0,
+ role TEXT NOT NULL DEFAULT 'member', tags TEXT NOT NULL DEFAULT '', warns INTEGER NOT NULL DEFAULT 0, activity_count INTEGER NOT NULL DEFAULT 0,
  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS projects (
@@ -52,6 +53,8 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, status);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
+CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
 	if err != nil {
 		return err
@@ -62,6 +65,10 @@ CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 		`ALTER TABLE projects ADD COLUMN topics TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN channel_chat_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE projects ADD COLUMN channel_message_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'`,
+		`ALTER TABLE users ADD COLUMN tags TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN warns INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN activity_count INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, alterErr := s.db.Exec(statement); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
@@ -81,8 +88,8 @@ VALUES(?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.usern
 
 func (s *Store) UserByTelegramID(ctx context.Context, id int64) (domain.User, error) {
 	var u domain.User
-	err := s.db.QueryRowContext(ctx, `SELECT id,telegram_id,username,first_name,last_name,language_code,is_blocked,created_at,updated_at FROM users WHERE telegram_id=?`, id).
-		Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsBlocked, &u.CreatedAt, &u.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,telegram_id,username,first_name,last_name,language_code,is_blocked,role,tags,warns,activity_count,created_at,updated_at FROM users WHERE telegram_id=?`, id).
+		Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsBlocked, &u.Role, &u.Tags, &u.Warns, &u.ActivityCount, &u.CreatedAt, &u.UpdatedAt)
 	return u, err
 }
 
@@ -223,4 +230,72 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var x Stats
 	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM users),(SELECT COUNT(*) FROM projects WHERE status='published'),(SELECT COUNT(*) FROM projects WHERE status='published' AND wants_contributors=1)`).Scan(&x.Users, &x.Projects, &x.Contributors)
 	return x, err
+}
+
+func (s *Store) UpsertNetworkGroup(ctx context.Context, g domain.NetworkGroup) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO network_groups(name,language,chat_id,chat_username,thread_id) VALUES(?,?,?,?,?) ON CONFLICT(language) DO UPDATE SET name=excluded.name,chat_id=excluded.chat_id,chat_username=excluded.chat_username,thread_id=excluded.thread_id`, g.Name, g.Language, g.ChatID, g.ChatUsername, g.ThreadID)
+	return err
+}
+func (s *Store) NetworkGroups(ctx context.Context) ([]domain.NetworkGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups ORDER BY language`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.NetworkGroup
+	for rows.Next() {
+		var g domain.NetworkGroup
+		if err := rows.Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+func (s *Store) NetworkGroupForLanguage(ctx context.Context, language string) (domain.NetworkGroup, error) {
+	var g domain.NetworkGroup
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups WHERE language=?`, language).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam)
+	return g, err
+}
+func (s *Store) NetworkGroupByChat(ctx context.Context, chatID int64) (domain.NetworkGroup, error) {
+	var g domain.NetworkGroup
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,language,chat_id,chat_username,thread_id,anti_spam FROM network_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.Language, &g.ChatID, &g.ChatUsername, &g.ThreadID, &g.AntiSpam)
+	return g, err
+}
+func (s *Store) RemoveNetworkGroup(ctx context.Context, id int64) error {
+	return requireChanged(s.db.ExecContext(ctx, `DELETE FROM network_groups WHERE id=?`, id))
+}
+func (s *Store) ToggleAntiSpam(ctx context.Context, chatID int64) (bool, error) {
+	if err := requireChanged(s.db.ExecContext(ctx, `UPDATE network_groups SET anti_spam=CASE anti_spam WHEN 0 THEN 1 ELSE 0 END WHERE chat_id=?`, chatID)); err != nil {
+		return false, err
+	}
+	g, err := s.NetworkGroupByChat(ctx, chatID)
+	return g.AntiSpam, err
+}
+func (s *Store) IncrementActivity(ctx context.Context, telegramID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET activity_count=activity_count+1 WHERE telegram_id=?`, telegramID)
+	return err
+}
+func (s *Store) SetRole(ctx context.Context, telegramID int64, role string) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE users SET role=? WHERE telegram_id=?`, role, telegramID))
+}
+func (s *Store) AddWarn(ctx context.Context, telegramID int64) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE users SET warns=warns+1 WHERE telegram_id=?`, telegramID))
+}
+func (s *Store) SetTags(ctx context.Context, telegramID int64, tags string) error {
+	return requireChanged(s.db.ExecContext(ctx, `UPDATE users SET tags=? WHERE telegram_id=?`, tags, telegramID))
+}
+func (s *Store) UserProjectCount(ctx context.Context, userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE user_id=?`, userID).Scan(&n)
+	return n, err
+}
+func (s *Store) SaveCustomCommand(ctx context.Context, name, response string, createdBy int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO custom_commands(name,response,created_by) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET response=excluded.response,created_by=excluded.created_by`, name, response, createdBy)
+	return err
+}
+func (s *Store) CustomCommand(ctx context.Context, name string) (domain.CustomCommand, error) {
+	var c domain.CustomCommand
+	err := s.db.QueryRowContext(ctx, `SELECT name,response FROM custom_commands WHERE name=?`, name).Scan(&c.Name, &c.Response)
+	return c, err
 }

@@ -2,7 +2,7 @@ module golanggopherbot
 
 go 1.23.0
 
-require github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
+require github.com/OvyFlash/telegram-bot-api v0.0.0-20260715235732-aca8bf3898bb
 
 require github.com/joho/godotenv v1.5.1
 
