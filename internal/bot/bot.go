@@ -60,6 +60,10 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
+	if update.MyChatMember != nil {
+		b.handleOwnMembership(update.MyChatMember)
+		return
+	}
 	var from *tgbotapi.User
 	if update.Message != nil {
 		from = update.Message.From
@@ -101,6 +105,22 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 	if state, ok := b.sessions.get(from.ID); ok {
 		b.input(ctx, u, m, state)
 	}
+}
+
+func (b *Bot) handleOwnMembership(change *tgbotapi.ChatMemberUpdated) {
+	status := change.NewChatMember.Status
+	if change.Chat.Type == "private" || status == "left" || status == "kicked" {
+		return
+	}
+	missing, err := b.missingBotRights(change.Chat.ID)
+	if err != nil {
+		return
+	}
+	if len(missing) == 0 {
+		return
+	}
+	b.send(change.Chat.ID, "Для работы сети боту нужны все административные права, кроме анонимности. Не хватает: "+esc(strings.Join(missing, ", "))+". Бот покидает группу.", nil)
+	_, _ = b.api.MakeRequest("leaveChat", tgbotapi.Params{"chat_id": strconv.FormatInt(change.Chat.ID, 10)})
 }
 
 func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
