@@ -135,10 +135,9 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			return
 		}
 		s.AuthorDescription = text
-		s.Language = "Go"
-		s.Step = stepRepo
+		s.Step = stepLanguage
 		b.sessions.set(u.TelegramID, s)
-		b.send(m.Chat.ID, "Теперь отправь публичную ссылку на GitHub-репозиторий.", nil)
+		b.languageMenu(m.Chat.ID)
 	case stepRepo:
 		b.send(m.Chat.ID, "Проверяю репозиторий…", nil)
 		repo, err := b.github.Fetch(ctx, text)
@@ -200,6 +199,17 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 	action, value := parts[0], parts[1]
 	s, ok := b.sessions.get(u.TelegramID)
 	switch action {
+	case "lang":
+		if !ok || s.Step != stepLanguage {
+			return
+		}
+		if _, exists := b.cfg.TargetForLanguage(value); !exists {
+			return
+		}
+		s.Language = value
+		s.Step = stepRepo
+		b.sessions.set(u.TelegramID, s)
+		b.edit(q, "Теперь отправь публичную ссылку на GitHub-репозиторий.", nil)
 	case "contributors":
 		if !ok || s.Step != stepContributors {
 			return
@@ -262,7 +272,13 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 	if u.Username == "" {
 		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
 	}
-	sent, err := b.publishMessage(formatPublishedProject(p, author, b.cfg.ProjectsChatUsername))
+	target, ok := b.cfg.TargetForLanguage(p.Language)
+	if !ok {
+		b.edit(q, "Для этого языка не настроена группа.", nil)
+		_ = b.store.DeleteProject(ctx, p.ID)
+		return
+	}
+	sent, err := b.publishMessage(target, formatPublishedProject(p, author, target.ChatUsername))
 	if err != nil {
 		_ = b.store.DeleteProject(ctx, p.ID)
 		b.logErr(err)
@@ -270,8 +286,26 @@ func (b *Bot) publish(ctx context.Context, u domain.User, q *tgbotapi.CallbackQu
 		return
 	}
 	_ = b.store.SetPublication(ctx, p.ID, sent.Chat.ID, sent.MessageID)
+	p.PublishedChatID, p.PublishedMessageID = sent.Chat.ID, sent.MessageID
+	channelPublished := false
+	if b.cfg.ProjectsChannel.ChatID != 0 || b.cfg.ProjectsChannel.Username != "" {
+		channel, channelErr := b.publishChannelMessage(formatChannelProject(p, b.groupMessageURL(p)))
+		if channelErr != nil {
+			b.logErr(channelErr)
+		} else {
+			channelPublished = true
+			p.ChannelChatID, p.ChannelMessageID = channel.Chat.ID, channel.MessageID
+			_ = b.store.SetChannelPublication(ctx, p.ID, channel.Chat.ID, channel.MessageID)
+		}
+	}
 	b.sessions.delete(u.TelegramID)
-	b.edit(q, "Готово! Проект опубликован в ветке «Ваши проекты».", nil)
+	if b.cfg.ProjectsChannel.ChatID != 0 || b.cfg.ProjectsChannel.Username != "" {
+		if !channelPublished {
+			b.edit(q, "Проект опубликован в языковой группе, но отправить его в общий канал не удалось.", nil)
+			return
+		}
+	}
+	b.edit(q, "Готово! Проект опубликован в языковой группе и общей ленте.", nil)
 }
 
 func (b *Bot) projectFilters(chatID int64) {
@@ -356,13 +390,13 @@ func catalogParams(value string) (int, bool, int, bool) {
 	return stars, flag == 1, offset, valid
 }
 
-func (b *Bot) publishMessage(text string) (tgbotapi.Message, error) {
-	chat := b.cfg.ProjectsChatUsername
-	if b.cfg.ProjectsChatID != 0 {
-		chat = strconv.FormatInt(b.cfg.ProjectsChatID, 10)
+func (b *Bot) publishMessage(target config.ProjectTarget, text string) (tgbotapi.Message, error) {
+	chat := target.ChatUsername
+	if target.ChatID != 0 {
+		chat = strconv.FormatInt(target.ChatID, 10)
 	}
 	response, err := b.api.MakeRequest("sendMessage", tgbotapi.Params{
-		"chat_id": chat, "message_thread_id": strconv.Itoa(b.cfg.ProjectsThreadID),
+		"chat_id": chat, "message_thread_id": strconv.Itoa(target.ThreadID),
 		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "true",
 	})
 	if err != nil {
@@ -370,6 +404,22 @@ func (b *Bot) publishMessage(text string) (tgbotapi.Message, error) {
 	}
 	var message tgbotapi.Message
 	if err := json.Unmarshal(response.Result, &message); err != nil {
+		return tgbotapi.Message{}, err
+	}
+	return message, nil
+}
+
+func (b *Bot) publishChannelMessage(text string) (tgbotapi.Message, error) {
+	chat := b.cfg.ProjectsChannel.Username
+	if b.cfg.ProjectsChannel.ChatID != 0 {
+		chat = strconv.FormatInt(b.cfg.ProjectsChannel.ChatID, 10)
+	}
+	response, err := b.api.MakeRequest("sendMessage", tgbotapi.Params{"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"})
+	if err != nil {
+		return tgbotapi.Message{}, err
+	}
+	var message tgbotapi.Message
+	if err = json.Unmarshal(response.Result, &message); err != nil {
 		return tgbotapi.Message{}, err
 	}
 	return message, nil
@@ -383,6 +433,14 @@ func (b *Bot) editPublishedMessage(p domain.Project, text string) error {
 		"chat_id": strconv.FormatInt(p.PublishedChatID, 10), "message_id": strconv.Itoa(p.PublishedMessageID),
 		"text": text, "parse_mode": "HTML", "disable_web_page_preview": "true",
 	})
+	return err
+}
+
+func (b *Bot) editChannelMessage(p domain.Project, text string) error {
+	if p.ChannelChatID == 0 || p.ChannelMessageID == 0 {
+		return nil
+	}
+	_, err := b.api.MakeRequest("editMessageText", tgbotapi.Params{"chat_id": strconv.FormatInt(p.ChannelChatID, 10), "message_id": strconv.Itoa(p.ChannelMessageID), "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"})
 	return err
 }
 
@@ -532,6 +590,11 @@ func (b *Bot) closeProject(ctx context.Context, u domain.User, q *tgbotapi.Callb
 		b.edit(q, "Проект закрыт в каталоге, но сообщение в группе обновить не удалось.", nil)
 		return
 	}
+	if err = b.editChannelMessage(p, closed); err != nil {
+		b.logErr(err)
+		b.edit(q, "Проект закрыт, но сообщение в общем канале обновить не удалось.", nil)
+		return
+	}
 	b.edit(q, "Проект закрыт и скрыт из каталога.", nil)
 }
 
@@ -545,15 +608,27 @@ func (b *Bot) syncProjectMessage(ctx context.Context, u domain.User, id int64) {
 	if u.Username == "" {
 		author = strings.TrimSpace(u.FirstName + " " + u.LastName)
 	}
-	if err = b.editPublishedMessage(p, formatPublishedProject(p, author, b.cfg.ProjectsChatUsername)); err != nil {
+	target, _ := b.cfg.TargetForLanguage(p.Language)
+	if err = b.editPublishedMessage(p, formatPublishedProject(p, author, target.ChatUsername)); err != nil {
 		b.logErr(err)
+	}
+	if b.cfg.ProjectsChannel.ChatID != 0 || b.cfg.ProjectsChannel.Username != "" {
+		if p.ChannelMessageID == 0 {
+			message, publishErr := b.publishChannelMessage(formatChannelProject(p, b.groupMessageURL(p)))
+			if publishErr != nil {
+				b.logErr(publishErr)
+			} else {
+				_ = b.store.SetChannelPublication(ctx, p.ID, message.Chat.ID, message.MessageID)
+			}
+		} else if err = b.editChannelMessage(p, formatChannelProject(p, b.groupMessageURL(p))); err != nil {
+			b.logErr(err)
+		}
 	}
 }
 
 func repoProject(current domain.Project, repo gh.Repo) domain.Project {
 	current.RepoURL, current.RepoOwner, current.RepoName, current.Description = repo.URL, repo.Owner, repo.Name, repo.Description
 	current.Topics, current.Stars = strings.Join(repo.Topics, ","), strconv.Itoa(repo.Stars)
-	current.Language = "Go"
 	return current
 }
 func projectID(value string) (int64, bool) {
@@ -656,6 +731,19 @@ func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKe
 		b.logErr(err)
 	}
 }
+func (b *Bot) languageMenu(chatID int64) {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := 0; i < len(b.cfg.ProjectTargets); i += 2 {
+		var row []tgbotapi.InlineKeyboardButton
+		for j := i; j < i+2 && j < len(b.cfg.ProjectTargets); j++ {
+			language := b.cfg.ProjectTargets[j].Language
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(language, "lang:"+language))
+		}
+		rows = append(rows, row)
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.send(chatID, "Выбери язык проекта. Он определяет группу для публикации:", &kb)
+}
 func formatDraft(s session) string {
 	p := domain.Project{Name: s.Name, Language: s.Language, RepoURL: s.RepoURL, Description: s.RepoDescription, AuthorDescription: s.AuthorDescription, Topics: s.Topics, Stars: strconv.Itoa(s.Stars), WantsContributors: s.WantsContributors}
 	return formatProject(p, "")
@@ -696,7 +784,8 @@ func (b *Bot) groupMessageURL(p domain.Project) string {
 	if p.PublishedMessageID == 0 {
 		return ""
 	}
-	username := strings.TrimPrefix(b.cfg.ProjectsChatUsername, "@")
+	target, _ := b.cfg.TargetForLanguage(p.Language)
+	username := strings.TrimPrefix(target.ChatUsername, "@")
 	if username != "" {
 		return fmt.Sprintf("https://t.me/%s/%d", username, p.PublishedMessageID)
 	}
@@ -706,6 +795,14 @@ func (b *Bot) groupMessageURL(p domain.Project) string {
 		return ""
 	}
 	return fmt.Sprintf("https://t.me/c/%s/%d", chatID, p.PublishedMessageID)
+}
+
+func formatChannelProject(p domain.Project, groupURL string) string {
+	card := formatProject(p, "")
+	if groupURL == "" {
+		return card
+	}
+	return card + "\n\n<a href=\"" + html.EscapeString(groupURL) + "\">Открыть публикацию в группе</a>"
 }
 
 func truncate(value string, limit int) string {

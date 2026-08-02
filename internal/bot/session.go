@@ -7,6 +7,7 @@ type step uint8
 const (
 	stepName step = iota + 1
 	stepDescription
+	stepLanguage
 	stepRepo
 	stepContributors
 	stepConfirm

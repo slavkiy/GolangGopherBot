@@ -18,6 +18,8 @@ type Project struct {
 	Status                                                                                      string
 	PublishedChatID                                                                             int64
 	PublishedMessageID                                                                          int
+	ChannelChatID                                                                               int64
+	ChannelMessageID                                                                            int
 	CreatedAt, UpdatedAt                                                                        time.Time
 }
 

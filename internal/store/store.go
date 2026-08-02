@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS projects (
  author_description TEXT NOT NULL DEFAULT '', topics TEXT NOT NULL DEFAULT '', stars TEXT NOT NULL DEFAULT '0',
  wants_contributors INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'published',
  published_chat_id INTEGER NOT NULL DEFAULT 0, published_message_id INTEGER NOT NULL DEFAULT 0,
+ channel_chat_id INTEGER NOT NULL DEFAULT 0, channel_message_id INTEGER NOT NULL DEFAULT 0,
  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, status);
@@ -59,6 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 	for _, statement := range []string{
 		`ALTER TABLE projects ADD COLUMN author_description TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN topics TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN channel_chat_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE projects ADD COLUMN channel_message_id INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, alterErr := s.db.Exec(statement); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
@@ -98,13 +101,18 @@ func (s *Store) SetPublication(ctx context.Context, id, chatID int64, messageID 
 	return err
 }
 
+func (s *Store) SetChannelPublication(ctx context.Context, id, chatID int64, messageID int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE projects SET channel_chat_id=?,channel_message_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, chatID, messageID, id)
+	return err
+}
+
 func (s *Store) DeleteProject(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, id)
 	return err
 }
 
 func (s *Store) ListProjects(ctx context.Context, minStars int, contributorsOnly bool, limit, offset int) ([]domain.Project, error) {
-	query := `SELECT id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at FROM projects WHERE status=?`
+	query := `SELECT id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,channel_chat_id,channel_message_id,created_at,updated_at FROM projects WHERE status=?`
 	args := []any{domain.StatusPublished}
 	if minStars > 0 {
 		query += ` AND CAST(stars AS INTEGER)>=?`
@@ -123,7 +131,7 @@ func (s *Store) ListProjects(ctx context.Context, minStars int, contributorsOnly
 	var out []domain.Project
 	for rows.Next() {
 		var p domain.Project
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.ChannelChatID, &p.ChannelMessageID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -131,11 +139,11 @@ func (s *Store) ListProjects(ctx context.Context, minStars int, contributorsOnly
 	return out, rows.Err()
 }
 
-const projectColumns = `id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,created_at,updated_at`
+const projectColumns = `id,user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status,published_chat_id,published_message_id,channel_chat_id,channel_message_id,created_at,updated_at`
 
 func scanProject(scanner interface{ Scan(...any) error }) (domain.Project, error) {
 	var p domain.Project
-	err := scanner.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.CreatedAt, &p.UpdatedAt)
+	err := scanner.Scan(&p.ID, &p.UserID, &p.Name, &p.Language, &p.RepoURL, &p.RepoOwner, &p.RepoName, &p.Description, &p.AuthorDescription, &p.Topics, &p.Stars, &p.WantsContributors, &p.Status, &p.PublishedChatID, &p.PublishedMessageID, &p.ChannelChatID, &p.ChannelMessageID, &p.CreatedAt, &p.UpdatedAt)
 	return p, err
 }
 

@@ -72,9 +72,16 @@ func TestCatalogParams(t *testing.T) {
 }
 
 func TestGroupMessageURL(t *testing.T) {
-	b := Bot{cfg: config.Config{ProjectsChatUsername: "@GolangGopher"}}
-	got := b.groupMessageURL(domain.Project{PublishedMessageID: 42})
+	b := Bot{cfg: config.Config{ProjectTargets: []config.ProjectTarget{{Language: "Go", ChatUsername: "@GolangGopher", ThreadID: 5}}}}
+	got := b.groupMessageURL(domain.Project{Language: "Go", PublishedMessageID: 42})
 	if got != "https://t.me/GolangGopher/42" {
 		t.Fatalf("unexpected URL: %s", got)
+	}
+}
+
+func TestChannelProjectLinksToGroup(t *testing.T) {
+	text := formatChannelProject(domain.Project{Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b"}, "https://t.me/GolangGopher/42")
+	if !strings.Contains(text, "Открыть публикацию в группе") || !strings.Contains(text, "https://t.me/GolangGopher/42") {
+		t.Fatalf("missing group link: %s", text)
 	}
 }

@@ -36,6 +36,16 @@ func TestUserAndProjectFlow(t *testing.T) {
 	if items[0].AuthorDescription != "Описание автора" || items[0].Topics != "golang,telegram-bot" {
 		t.Fatalf("project metadata was not saved: %+v", items[0])
 	}
+	if err = s.SetChannelPublication(ctx, p.ID, -10099, 77); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.ProjectForUser(ctx, p.ID, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ChannelChatID != -10099 || stored.ChannelMessageID != 77 {
+		t.Fatalf("channel publication not saved: %+v", stored)
+	}
 	items, err = s.ListProjects(ctx, 10, false, 5, 0)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("star filter missed project: %+v %v", items, err)
