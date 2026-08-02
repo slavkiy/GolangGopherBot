@@ -95,3 +95,17 @@ func TestFormatProfileTags(t *testing.T) {
 		t.Fatalf("unexpected empty tags: %s", got)
 	}
 }
+
+func TestButtonOwnership(t *testing.T) {
+	b := Bot{buttonOwners: make(map[string]int64)}
+	b.bindButtons(-1001, 42, 7)
+	if !b.canUseButtons(-1001, 42, 7) {
+		t.Fatal("owner cannot use buttons")
+	}
+	if b.canUseButtons(-1001, 42, 8) {
+		t.Fatal("another user can use buttons")
+	}
+	if !b.canUseButtons(-1001, 43, 8) {
+		t.Fatal("unbound public buttons were blocked")
+	}
+}

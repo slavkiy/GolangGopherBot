@@ -32,6 +32,8 @@ type Bot struct {
 	spam         map[string][]time.Time
 	deleteMu     sync.Mutex
 	deleteTimers map[string]*time.Timer
+	buttonMu     sync.RWMutex
+	buttonOwners map[string]int64
 }
 
 func New(cfg config.Config, s *store.Store) (*Bot, error) {
@@ -39,7 +41,7 @@ func New(cfg config.Config, s *store.Store) (*Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), sessions: newSessions(), spam: make(map[string][]time.Time), deleteTimers: make(map[string]*time.Timer)}, nil
+	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), sessions: newSessions(), spam: make(map[string][]time.Time), deleteTimers: make(map[string]*time.Timer), buttonOwners: make(map[string]int64)}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -358,6 +360,10 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 }
 
 func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery) {
+	if q.Message != nil && !b.canUseButtons(q.Message.Chat.ID, q.Message.MessageID, u.TelegramID) {
+		_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(q.ID, "Это меню открыто другим пользователем."))
+		return
+	}
 	_, _ = b.api.Request(tgbotapi.NewCallback(q.ID, ""))
 	parts := strings.SplitN(q.Data, ":", 2)
 	if len(parts) != 2 {
@@ -1093,7 +1099,7 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 			return
 		}
 		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Подтвердить исключение", fmt.Sprintf("admsanction:%d", m.Chat.ID)), tgbotapi.NewInlineKeyboardButtonData("Отмена", "admmenu:show")))
-		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Исключить группу из сети и вывести бота? Участники и история останутся без изменений.", &kb)
+		b.sendOwnedInThread(m.Chat.ID, m.MessageThreadID, "Исключить группу из сети и вывести бота? Участники и история останутся без изменений.", &kb, u.TelegramID)
 	case "antispam":
 		enabled, err := b.store.ToggleAntiSpam(ctx, m.Chat.ID)
 		if err != nil {
@@ -1199,9 +1205,10 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 
 func (b *Bot) adminMenu(ctx context.Context, u domain.User, chatID int64, threadID int) {
 	kb := b.adminKeyboard(u)
-	b.sendInThread(chatID, threadID, "<b>Управление сетью</b>", &kb)
+	b.sendOwnedInThread(chatID, threadID, "<b>Управление сетью</b>", &kb, u.TelegramID)
 }
 func (b *Bot) adminMenuEdit(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery) {
+	b.bindButtons(q.Message.Chat.ID, q.Message.MessageID, u.TelegramID)
 	kb := b.adminKeyboard(u)
 	b.edit(q, "<b>Управление сетью</b>", &kb)
 }
@@ -1652,6 +1659,36 @@ func (b *Bot) sendInThread(chatID int64, threadID int, text string, kb *tgbotapi
 		b.scheduleDelete(sent.Chat.ID, sent.MessageID)
 	}
 }
+func (b *Bot) sendOwnedInThread(chatID int64, threadID int, text string, kb *tgbotapi.InlineKeyboardMarkup, ownerID int64) {
+	m := tgbotapi.NewMessage(chatID, text)
+	m.MessageThreadID = threadID
+	m.ParseMode = "HTML"
+	m.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
+	if kb != nil {
+		m.ReplyMarkup = *kb
+	}
+	sent, err := b.api.Send(m)
+	if err != nil {
+		b.logErr(err)
+		return
+	}
+	b.bindButtons(sent.Chat.ID, sent.MessageID, ownerID)
+	b.scheduleDelete(sent.Chat.ID, sent.MessageID)
+}
+func callbackMessageKey(chatID int64, messageID int) string {
+	return fmt.Sprintf("%d:%d", chatID, messageID)
+}
+func (b *Bot) bindButtons(chatID int64, messageID int, ownerID int64) {
+	b.buttonMu.Lock()
+	b.buttonOwners[callbackMessageKey(chatID, messageID)] = ownerID
+	b.buttonMu.Unlock()
+}
+func (b *Bot) canUseButtons(chatID int64, messageID int, userID int64) bool {
+	b.buttonMu.RLock()
+	owner, exists := b.buttonOwners[callbackMessageKey(chatID, messageID)]
+	b.buttonMu.RUnlock()
+	return !exists || owner == userID
+}
 func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, text)
 	m.ParseMode = "HTML"
@@ -1679,6 +1716,9 @@ func (b *Bot) scheduleDelete(chatID int64, messageID int) {
 		b.deleteMu.Lock()
 		delete(b.deleteTimers, key)
 		b.deleteMu.Unlock()
+		b.buttonMu.Lock()
+		delete(b.buttonOwners, key)
+		b.buttonMu.Unlock()
 	})
 	b.deleteMu.Unlock()
 }
