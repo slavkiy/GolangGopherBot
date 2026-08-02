@@ -30,8 +30,7 @@ go run .
 
 ```env
 BOT_TOKEN=...
-PROJECTS_CHAT_ID=-1001234567890
-PROJECTS_THREAD_ID=5
+PROJECT_GROUPS_JSON=[{"language":"Go","chat_id":-1004494598650,"chat_username":"@GolangGopher","thread_id":5}]
 ADMIN_IDS=123456789,987654321
 ```
 
@@ -46,10 +45,8 @@ PROJECTS_CHANNEL_USERNAME=@AllDevProjects
 Каждый язык публикуется в своей теме `Ваши проекты`. Общий канал получает
 копию карточки со ссылкой на исходное сообщение языковой группы.
 
-`PROJECTS_CHAT_ID` — числовой ID супергруппы. Вместо него можно задать
-`PROJECTS_CHAT_USERNAME=@GolangGopher`, но числовой ID надёжнее. Бот должен быть
-добавлен в группу и иметь право отправлять сообщения в тему. `GITHUB_TOKEN`
-необязателен, но повышает лимит запросов GitHub API.
+Бот должен быть добавлен во все группы и иметь право отправлять сообщения в
+указанные темы. `GITHUB_TOKEN` необязателен, но повышает лимит запросов GitHub API.
 
 База по умолчанию создаётся в `data/bot.db`. Путь меняется через
 `DATABASE_PATH`.

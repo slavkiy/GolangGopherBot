@@ -23,25 +23,20 @@ type PublishTarget struct {
 }
 
 type Config struct {
-	BotToken             string
-	DatabasePath         string
-	ProjectsChatID       int64
-	ProjectsChatUsername string
-	ProjectsThreadID     int
-	AdminIDs             map[int64]struct{}
-	GitHubToken          string
-	ProjectTargets       []ProjectTarget
-	ProjectsChannel      PublishTarget
+	BotToken        string
+	DatabasePath    string
+	AdminIDs        map[int64]struct{}
+	GitHubToken     string
+	ProjectTargets  []ProjectTarget
+	ProjectsChannel PublishTarget
 }
 
 func Load() (Config, error) {
 	_ = godotenv.Load()
 	cfg := Config{
 		BotToken: os.Getenv("BOT_TOKEN"), DatabasePath: valueOr("DATABASE_PATH", "data/bot.db"),
-		ProjectsChatUsername: os.Getenv("PROJECTS_CHAT_USERNAME"), ProjectsThreadID: intValue("PROJECTS_THREAD_ID", 5),
 		AdminIDs: parseIDs(os.Getenv("ADMIN_IDS")), GitHubToken: os.Getenv("GITHUB_TOKEN"),
 	}
-	cfg.ProjectsChatID, _ = strconv.ParseInt(os.Getenv("PROJECTS_CHAT_ID"), 10, 64)
 	cfg.ProjectsChannel.ChatID, _ = strconv.ParseInt(os.Getenv("PROJECTS_CHANNEL_ID"), 10, 64)
 	cfg.ProjectsChannel.Username = os.Getenv("PROJECTS_CHANNEL_USERNAME")
 	if cfg.BotToken == "" {
@@ -52,11 +47,8 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("PROJECT_GROUPS_JSON: %w", err)
 		}
 	}
-	if len(cfg.ProjectTargets) == 0 && (cfg.ProjectsChatID != 0 || cfg.ProjectsChatUsername != "") {
-		cfg.ProjectTargets = []ProjectTarget{{Language: "Go", ChatID: cfg.ProjectsChatID, ChatUsername: cfg.ProjectsChatUsername, ThreadID: cfg.ProjectsThreadID}}
-	}
 	if len(cfg.ProjectTargets) == 0 {
-		return Config{}, fmt.Errorf("PROJECT_GROUPS_JSON or legacy project group settings must be set")
+		return Config{}, fmt.Errorf("PROJECT_GROUPS_JSON must contain at least one group")
 	}
 	seen := map[string]bool{}
 	for i := range cfg.ProjectTargets {
@@ -69,8 +61,6 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid or duplicate project target %q", t.Language)
 		}
 		seen[t.Language] = true
-	}
-	if cfg.ProjectsChannel.ChatID == 0 && cfg.ProjectsChannel.Username == "" { /* Канал необязателен для совместимости. */
 	}
 	return cfg, nil
 }
@@ -89,13 +79,6 @@ func valueOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-func intValue(key string, fallback int) int {
-	v, err := strconv.Atoi(os.Getenv(key))
-	if err != nil {
-		return fallback
-	}
-	return v
 }
 func parseIDs(raw string) map[int64]struct{} {
 	result := make(map[int64]struct{})
