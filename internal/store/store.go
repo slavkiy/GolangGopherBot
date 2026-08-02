@@ -321,6 +321,22 @@ func (s *Store) RegisteredGroupByChat(ctx context.Context, chatID int64) (domain
 	err := s.db.QueryRowContext(ctx, `SELECT id,name,chat_id,chat_username FROM registered_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername)
 	return g, err
 }
+func (s *Store) RegisteredGroups(ctx context.Context) ([]domain.RegisteredGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,chat_id,chat_username FROM registered_groups ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.RegisteredGroup
+	for rows.Next() {
+		var g domain.RegisteredGroup
+		if err := rows.Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
 func (s *Store) SanctionGroup(ctx context.Context, chatID int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

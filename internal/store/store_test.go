@@ -193,6 +193,10 @@ func TestRegisterAndSanctionGroup(t *testing.T) {
 	if _, err = s.RegisteredGroupByChat(ctx, -1001); err != nil {
 		t.Fatal(err)
 	}
+	registeredList, listErr := s.RegisteredGroups(ctx)
+	if listErr != nil || len(registeredList) != 1 || registeredList[0].Name != "Go community" {
+		t.Fatalf("unexpected registered groups: %+v %v", registeredList, listErr)
+	}
 	if err = s.UpsertNetworkGroup(ctx, domain.NetworkGroup{Name: "Projects", Language: "Go", ChatID: -1001, ThreadID: 5}); err != nil {
 		t.Fatal(err)
 	}

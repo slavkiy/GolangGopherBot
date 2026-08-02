@@ -1138,16 +1138,29 @@ func (b *Bot) adminBackKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	return &kb
 }
 func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
-	groups, err := b.store.NetworkGroups(ctx)
+	registered, err := b.store.RegisteredGroups(ctx)
 	if err != nil {
 		return
+	}
+	routes, _ := b.store.NetworkGroups(ctx)
+	routeByChat := make(map[int64]domain.NetworkGroup, len(routes))
+	for _, route := range routes {
+		routeByChat[route.ChatID] = route
 	}
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var text strings.Builder
 	text.WriteString("<b>Группы сети</b>\n")
-	for _, g := range groups {
-		fmt.Fprintf(&text, "\n%s: %s, тема %d", esc(g.Language), esc(g.Name), g.ThreadID)
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отключить "+shortButton(g.Name), fmt.Sprintf("admdelgroup:%d", g.ID))))
+	if len(registered) == 0 {
+		text.WriteString("\nНет зарегистрированных групп.")
+	}
+	for _, g := range registered {
+		route, configured := routeByChat[g.ChatID]
+		if configured {
+			fmt.Fprintf(&text, "\n\n%s\nЯзык: %s, тема: %d", esc(g.Name), esc(route.Language), route.ThreadID)
+		} else {
+			fmt.Fprintf(&text, "\n\n%s\nТема проектов не настроена", esc(g.Name))
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить "+shortButton(g.Name), fmt.Sprintf("admsanction:%d", g.ChatID))))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
