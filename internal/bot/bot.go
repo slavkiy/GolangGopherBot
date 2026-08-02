@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"golanggopherbot/internal/aireview"
 	"golanggopherbot/internal/config"
 	"golanggopherbot/internal/domain"
 	gh "golanggopherbot/internal/github"
@@ -30,6 +31,7 @@ type Bot struct {
 	cfg          config.Config
 	store        *store.Store
 	github       *gh.Client
+	reviewer     *aireview.Service
 	sessions     *sessions
 	spamMu       sync.Mutex
 	spam         map[string][]time.Time
@@ -44,7 +46,7 @@ func New(cfg config.Config, s *store.Store) (*Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), sessions: newSessions(), spam: make(map[string][]time.Time), deleteTimers: make(map[string]*time.Timer), buttonOwners: make(map[string]int64)}, nil
+	return &Bot{api: api, cfg: cfg, store: s, github: gh.New(cfg.GitHubToken), reviewer: aireview.New(cfg.OllamaURL, cfg.GitHubToken), sessions: newSessions(), spam: make(map[string][]time.Time), deleteTimers: make(map[string]*time.Timer), buttonOwners: make(map[string]int64)}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -126,15 +128,28 @@ func (b *Bot) handleOwnMembership(change *tgbotapi.ChatMemberUpdated) {
 		return
 	}
 	chatID := change.Chat.ID
+	chatType := change.Chat.Type
 	go func() {
 		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		<-timer.C
-		missing, err := b.missingBotRights(chatID)
+		var (
+			missing []string
+			err     error
+		)
+		if chatType == "channel" {
+			missing, err = b.missingSyncRights(chatID, chatType)
+		} else {
+			missing, err = b.missingBotRights(chatID)
+		}
 		if err != nil || len(missing) == 0 {
 			return
 		}
-		b.send(chatID, "Для работы сети боту нужны административные права. Не хватает: "+esc(strings.Join(missing, ", "))+". Бот покидает группу.", nil)
+		leaveText := "Бот покидает группу."
+		if chatType == "channel" {
+			leaveText = "Бот покидает канал."
+		}
+		b.send(chatID, "Для работы сети боту нужны административные права. Не хватает: "+esc(strings.Join(missing, ", "))+". "+leaveText, nil)
 		_, _ = b.api.MakeRequest("leaveChat", tgbotapi.Params{"chat_id": strconv.FormatInt(chatID, 10)})
 	}()
 }
@@ -144,12 +159,14 @@ func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 	case "start":
 		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Привет! Здесь можно добавить open-source проект сообщества и найти проекты для участия.\n\n/project  добавить проект\n/myprojects  мои проекты\n/projects  смотреть проекты\n/cancel  отменить заполнение\n/help  помощь", nil)
 	case "help":
-		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Команды:\n/project  новый проект\n/myprojects  управление моими проектами\n/projects  каталог и фильтры\n/cancel  отмена\n/admin  управление (для администраторов)", nil)
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Команды:\n/project  новый проект\n/myprojects  управление моими проектами\n/projects  каталог и фильтры\n/ai  обзор GitHub-проекта\n/cancel  отмена\n/admin  управление (для администраторов)", nil)
 	case "project":
 		b.sessions.set(u.TelegramID, session{Step: stepName})
 		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Как называется проект? Отправь название (до 80 символов).", nil)
 	case "projects":
 		b.projectFilters(m.Chat.ID)
+	case "ai":
+		b.startAIReview(ctx, u, m)
 	case "myprojects":
 		b.showMyProjects(ctx, u, m.Chat.ID, nil)
 	case "cancel":
@@ -301,7 +318,7 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь на сообщение или отправь @username / ID.", nil)
 			return
 		}
-		err = b.store.AddWarn(ctx, target.TelegramID)
+		err = b.addWarnAndRun(ctx, target, m)
 		b.sessions.delete(u.TelegramID)
 		if err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
@@ -388,11 +405,12 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		}
 	case stepAdminAutomationValue:
 		value := strings.TrimSpace(m.Text)
-		if s.AutomationAction == "send" && (value == "" || len([]rune(value)) > 1000) {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Текст должен быть от 1 до 1000 символов.", nil)
+		ruleValue, err := b.buildAutomationValue(s, value)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, err.Error(), nil)
 			return
 		}
-		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: s.AdminChatID, Event: s.AutomationEvent, Action: s.AutomationAction, Value: value}, u.TelegramID); err != nil {
+		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: s.AdminChatID, Event: s.AutomationEvent, Action: s.AutomationAction, Value: ruleValue}, u.TelegramID); err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Не удалось сохранить событие.", nil)
 			return
 		}
@@ -494,6 +512,18 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		b.closeProject(ctx, u, q, value)
 	case "myprojects":
 		b.showMyProjects(ctx, u, q.Message.Chat.ID, q)
+	case "aimodel":
+		if !ok || s.Step != stepAIModel || s.AIRepoURL == "" {
+			return
+		}
+		b.sessions.delete(u.TelegramID)
+		b.edit(q, "Проверяю репозиторий. Это может занять до пары минут.", nil)
+		go b.runAIReview(context.Background(), q.Message.Chat.ID, q.Message.MessageThreadID, s.AIRepoURL, value)
+	case "aicancel":
+		if ok && s.Step == stepAIModel {
+			b.sessions.delete(u.TelegramID)
+		}
+		b.edit(q, "Обзор отменён.", nil)
 	case "admstats":
 		if b.canModerate(u) {
 			x, e := b.store.Stats(ctx)
@@ -1029,7 +1059,7 @@ func (b *Bot) closeProject(ctx context.Context, u domain.User, q *tgbotapi.Callb
 		b.logErr(err)
 		return
 	}
-	closed := fmt.Sprintf("<b>%s</b> закрыт по решению автора.", esc(p.Name))
+	closed := fmt.Sprintf("<b>%s</b> автор (имя: %s) решил исключить проект из каталога сообщества.", esc(p.Name), esc(u.Username))
 	if err = b.editPublishedMessage(p, closed); err != nil {
 		b.logErr(err)
 		b.edit(q, "Проект закрыт в каталоге, но сообщение в группе обновить не удалось.", nil)
@@ -1110,6 +1140,10 @@ func (b *Bot) groupCommand(ctx context.Context, u domain.User, m *tgbotapi.Messa
 		b.showRequestedUserInfo(ctx, u, m)
 		return
 	}
+	if m.Command() == "ai" {
+		b.startAIReview(ctx, u, m)
+		return
+	}
 	if !b.canModerate(u) {
 		b.runCustomCommand(ctx, m)
 		return
@@ -1133,6 +1167,142 @@ func (b *Bot) groupCommand(ctx context.Context, u domain.User, m *tgbotapi.Messa
 		b.adminBlock(ctx, m, args, false)
 	default:
 		b.runCustomCommand(ctx, m)
+	}
+}
+
+func (b *Bot) startAIReview(ctx context.Context, u domain.User, m *tgbotapi.Message) {
+	repoURL := extractGitHubURL(m.CommandArguments())
+	if repoURL == "" && m.ReplyToMessage != nil {
+		repoURL = githubURLFromMessage(m.ReplyToMessage)
+	}
+	if repoURL == "" {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь на сообщение со ссылкой GitHub или отправь: /ai https://github.com/owner/repo", nil)
+		return
+	}
+	models, err := b.reviewer.AvailableModels(ctx)
+	if err != nil {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Локальная ollama недоступна: "+esc(err.Error()), nil)
+		return
+	}
+	if len(models) == 0 {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "В ollama нет доступных моделей.", nil)
+		return
+	}
+	b.sessions.set(u.TelegramID, session{Step: stepAIModel, AIRepoURL: repoURL})
+	kb := aiModelKeyboard(models)
+	b.sendOwnedInThread(m.Chat.ID, m.MessageThreadID, "Выбери модель для обзора проекта:", &kb, u.TelegramID)
+}
+
+func aiModelKeyboard(models []aireview.Model) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	for i, model := range models {
+		label := model.Label
+		if label == "" {
+			label = model.Name
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "aimodel:"+model.Name))
+		if len(row) == 2 || i == len(models)-1 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отмена", "aicancel:run")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func githubURLFromMessage(m *tgbotapi.Message) string {
+	if m == nil {
+		return ""
+	}
+	for _, value := range []string{m.Text, m.Caption} {
+		if url := extractGitHubURL(value); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+func extractGitHubURL(text string) string {
+	for _, part := range strings.Fields(strings.TrimSpace(text)) {
+		part = strings.Trim(part, " \n\r\t<>()[]{}\",")
+		if strings.HasPrefix(strings.ToLower(part), "https://github.com/") || strings.HasPrefix(strings.ToLower(part), "http://github.com/") {
+			return part
+		}
+	}
+	return ""
+}
+
+func (b *Bot) runAIReview(ctx context.Context, chatID int64, threadID int, repoURL, model string) {
+	statusMsg := tgbotapi.NewMessage(chatID, "<b>AI-обзор</b>\nПодготовка анализа…")
+	statusMsg.MessageThreadID = threadID
+	statusMsg.ParseMode = "HTML"
+	sent, err := b.api.Send(statusMsg)
+	if err != nil {
+		b.logErr(err)
+		return
+	}
+	reviewCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	started := time.Now()
+	lastText := ""
+	lastPush := time.Time{}
+	push := func(text string, force bool) {
+		if text == "" {
+			return
+		}
+		if !force && time.Since(lastPush) < 1200*time.Millisecond {
+			return
+		}
+		if text == lastText {
+			return
+		}
+		lastText = text
+		lastPush = time.Now()
+		b.editMessage(sent.Chat.ID, sent.MessageID, text)
+	}
+	header := "<b>AI-обзор проекта</b>\nМодель: <code>" + esc(model) + "</code>\nРепозиторий: " + esc(repoURL)
+	result, err := b.reviewer.ReviewStream(reviewCtx, repoURL, model, func(p aireview.Progress) error {
+		body := p.Status
+		if strings.TrimSpace(p.Text) != "" {
+			body = "Поток ответа:\n\n" + esc(p.Text)
+		}
+		if body == "" {
+			body = "Подготовка анализа…"
+		}
+		push(header+"\n\n"+body, p.Done)
+		return nil
+	})
+	if err != nil {
+		b.editMessage(sent.Chat.ID, sent.MessageID, header+"\n\nНе удалось сделать обзор: "+esc(err.Error()))
+		return
+	}
+	finalText := header + "\n\n" + esc(result.Text) + "\n\n<i>Готово за " + esc(time.Since(started).Round(time.Second).String()) + ".</i>"
+	push(finalText, true)
+}
+
+func (b *Bot) sendLongHTML(chatID int64, threadID int, text string) {
+	const limit = 3800
+	for len(text) > 0 {
+		chunk := text
+		if len(chunk) > limit {
+			split := strings.LastIndex(chunk[:limit], "\n")
+			if split < limit/2 {
+				split = limit
+			}
+			chunk = chunk[:split]
+		}
+		b.sendInThread(chatID, threadID, chunk, nil)
+		text = strings.TrimLeft(text[len(chunk):], "\n")
+	}
+}
+
+func (b *Bot) editMessage(chatID int64, messageID int, text string) {
+	m := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	m.ParseMode = "HTML"
+	m.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
+	if _, err := b.api.Send(m); err != nil {
+		b.logErr(err)
 	}
 }
 
@@ -1625,7 +1795,7 @@ func (b *Bot) automationMenu(ctx context.Context, u domain.User, q *tgbotapi.Cal
 		b.edit(q, "Не удалось загрузить события.", b.adminBackKeyboard())
 		return
 	}
-	events := map[string]string{"join": "Вход", "leave": "Выход", "message": "Сообщение", "command": "Команда", "photo": "Фото", "file": "Файл", "link": "Ссылка", "antispam": "Антиспам"}
+	events := map[string]string{"join": "Вход", "leave": "Выход", "message": "Сообщение", "command": "Команда", "photo": "Фото", "file": "Файл", "link": "Ссылка", "antispam": "Антиспам", "warns": "Порог варнов"}
 	actions := map[string]string{"send": "отправить текст", "delete": "удалить сообщение", "warn": "добавить варн", "ban": "бан во всей сети"}
 	title := "Локальные события группы"
 	if scope == "global" {
@@ -1635,6 +1805,9 @@ func (b *Bot) automationMenu(ctx context.Context, u domain.User, q *tgbotapi.Cal
 	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить событие", "admevent:"+scope+",choose"))}
 	for _, r := range rules {
 		text += fmt.Sprintf("\n\n%d. %s → %s", r.ID, events[r.Event], actions[r.Action])
+		if extra := automationRuleDetails(r); extra != "" {
+			text += "\n" + extra
+		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Удалить "+strconv.FormatInt(r.ID, 10), "admeventdel:"+scope+","+strconv.FormatInt(r.ID, 10))))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevents:show")))
@@ -1647,6 +1820,7 @@ func (b *Bot) automationEventMenu(q *tgbotapi.CallbackQuery, scope string) {
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новое сообщение", "admevent:"+scope+",message"), tgbotapi.NewInlineKeyboardButtonData("Команда", "admevent:"+scope+",command")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Фото", "admevent:"+scope+",photo"), tgbotapi.NewInlineKeyboardButtonData("Файл", "admevent:"+scope+",file"), tgbotapi.NewInlineKeyboardButtonData("Ссылка", "admevent:"+scope+",link")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Срабатывание антиспама", "admevent:"+scope+",antispam")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Порог варнов", "admevent:"+scope+",warns")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admeventscope:"+scope)),
 	)
 	b.edit(q, "<b>Выбери событие</b>", &kb)
@@ -1660,12 +1834,15 @@ func (b *Bot) automationActionMenu(q *tgbotapi.CallbackQuery, scope, event strin
 		return
 	}
 	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить текст", "admaction:"+scope+","+event+",send"), tgbotapi.NewInlineKeyboardButtonData("Удалить сообщение", "admaction:"+scope+","+event+",delete")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admaction:"+scope+","+event+",warn"))}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Бан во всей сети", "admaction:"+scope+","+event+",ban")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevent:"+scope+",choose")))
+	if event == "warns" {
+		rows = [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить текст", "admaction:"+scope+","+event+",send")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Бан во всей сети", "admaction:"+scope+","+event+",ban"))}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevent:"+scope+",choose")))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.edit(q, "<b>Выбери действие</b>", &kb)
 }
 func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, scope, event, action string) {
-	if !validAutomationEvent(event) || !map[string]bool{"send": true, "delete": true, "warn": true, "ban": true}[action] {
+	if !validAutomationEvent(event) || !validAutomationAction(event, action) {
 		return
 	}
 	if action == "ban" && !b.isOwner(u) {
@@ -1679,6 +1856,16 @@ func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbot
 	if scope == "global" {
 		chatID = 0
 	}
+	if event == "warns" {
+		s := session{Step: stepAdminAutomationValue, AdminChatID: chatID, AutomationEvent: event, AutomationAction: action}
+		b.sessions.set(u.TelegramID, s)
+		prompt := "Отправь число варнов, при котором должно сработать событие. Например: 3"
+		if action == "send" {
+			prompt = "Отправь порог и текст одним сообщением.\n\nФормат:\n3 Текст уведомления\n\nПеременные: {name}, {username}, {id}, {group}, {warns}."
+		}
+		b.edit(q, prompt, b.adminBackKeyboard())
+		return
+	}
 	if action != "send" {
 		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: chatID, Event: event, Action: action}, u.TelegramID); err != nil {
 			b.edit(q, "Не удалось сохранить событие.", b.adminBackKeyboard())
@@ -1691,7 +1878,88 @@ func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbot
 	b.edit(q, "Отправь текст. Переменные: {name}, {username}, {id}, {group}.", b.adminBackKeyboard())
 }
 func validAutomationEvent(event string) bool {
-	return map[string]bool{"join": true, "leave": true, "message": true, "command": true, "photo": true, "file": true, "link": true, "antispam": true}[event]
+	return map[string]bool{"join": true, "leave": true, "message": true, "command": true, "photo": true, "file": true, "link": true, "antispam": true, "warns": true}[event]
+}
+func validAutomationAction(event, action string) bool {
+	if event == "warns" {
+		return action == "send" || action == "ban"
+	}
+	return map[string]bool{"send": true, "delete": true, "warn": true, "ban": true}[action]
+}
+func automationRuleDetails(r domain.AutomationRule) string {
+	if r.Event != "warns" {
+		return ""
+	}
+	limit, text := parseWarnRuleValue(r.Value)
+	if limit <= 0 {
+		return ""
+	}
+	details := "Порог: " + strconv.Itoa(limit)
+	if r.Action == "send" && text != "" {
+		details += "\nТекст: " + esc(text)
+	}
+	return details
+}
+func parseWarnRuleValue(raw string) (int, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, ""
+	}
+	lines := strings.SplitN(raw, "\n", 2)
+	head := strings.TrimSpace(lines[0])
+	parts := strings.Fields(head)
+	if len(parts) == 0 {
+		return 0, ""
+	}
+	limit, err := strconv.Atoi(parts[0])
+	if err != nil || limit <= 0 {
+		return 0, ""
+	}
+	if len(lines) == 2 {
+		return limit, strings.TrimSpace(lines[1])
+	}
+	if len(parts) > 1 {
+		return limit, strings.TrimSpace(strings.TrimPrefix(head, parts[0]))
+	}
+	return limit, ""
+}
+func (b *Bot) buildAutomationValue(s session, input string) (string, error) {
+	if s.AutomationEvent != "warns" {
+		if s.AutomationAction == "send" && (input == "" || len([]rune(input)) > 1000) {
+			return "", fmt.Errorf("текст должен быть от 1 до 1000 символов")
+		}
+		return input, nil
+	}
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("отправь число варнов")
+	}
+	limit, err := strconv.Atoi(parts[0])
+	if err != nil || limit <= 0 || limit > 100 {
+		return "", fmt.Errorf("число варнов должно быть от 1 до 100")
+	}
+	if s.AutomationAction != "send" {
+		return strconv.Itoa(limit), nil
+	}
+	text := strings.TrimSpace(strings.TrimPrefix(input, parts[0]))
+	if text == "" || len([]rune(text)) > 1000 {
+		return "", fmt.Errorf("после числа нужен текст от 1 до 1000 символов")
+	}
+	return strconv.Itoa(limit) + "\n" + text, nil
+}
+func (b *Bot) addWarnAndRun(ctx context.Context, target domain.User, m *tgbotapi.Message) error {
+	if err := b.store.AddWarn(ctx, target.TelegramID); err != nil {
+		return err
+	}
+	updated, err := b.store.UserByTelegramID(ctx, target.TelegramID)
+	if err != nil {
+		return err
+	}
+	target.Warns = updated.Warns
+	if m != nil {
+		b.runAutomations(ctx, m, target, "warns")
+	}
+	return nil
 }
 func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	registered, err := b.store.RegisteredGroups(ctx)
@@ -1772,8 +2040,7 @@ func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64, thr
 		photo.Caption = caption
 		photo.ParseMode = "HTML"
 		photo.MessageThreadID = threadID
-		if sent, sendErr := b.api.Send(photo); sendErr == nil {
-			b.scheduleDelete(sent.Chat.ID, sent.MessageID)
+		if _, sendErr := b.api.Send(photo); sendErr == nil {
 			return
 		} else {
 			b.logErr(sendErr)
@@ -1881,7 +2148,7 @@ func (b *Bot) checkSpam(ctx context.Context, u domain.User, m *tgbotapi.Message)
 	}
 	_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
 	if g.SpamAction == "delete_warn" {
-		_ = b.store.AddWarn(ctx, u.TelegramID)
+		_ = b.addWarnAndRun(ctx, u, m)
 	}
 	b.runAutomations(ctx, m, u, "antispam")
 	return true
@@ -1949,6 +2216,12 @@ func (b *Bot) runAutomations(ctx context.Context, m *tgbotapi.Message, u domain.
 		if !rule.Enabled {
 			continue
 		}
+		if event == "warns" {
+			limit, _ := parseWarnRuleValue(rule.Value)
+			if limit <= 0 || u.Warns != limit {
+				continue
+			}
+		}
 		if b.canModerate(u) && rule.Action != "send" {
 			continue
 		}
@@ -1962,13 +2235,17 @@ func (b *Bot) runAutomations(ctx context.Context, m *tgbotapi.Message, u domain.
 			if u.Username != "" {
 				username = "@" + u.Username
 			}
-			text := strings.NewReplacer("{name}", esc(name), "{username}", esc(username), "{id}", strconv.FormatInt(u.TelegramID, 10), "{group}", esc(m.Chat.Title)).Replace(rule.Value)
+			textValue := rule.Value
+			if event == "warns" {
+				_, textValue = parseWarnRuleValue(rule.Value)
+			}
+			text := strings.NewReplacer("{name}", esc(name), "{username}", esc(username), "{id}", strconv.FormatInt(u.TelegramID, 10), "{group}", esc(m.Chat.Title), "{warns}", strconv.Itoa(u.Warns)).Replace(textValue)
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, text, nil)
 		case "delete":
 			_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
 			stop = true
 		case "warn":
-			_ = b.store.AddWarn(ctx, u.TelegramID)
+			_ = b.addWarnAndRun(ctx, u, m)
 		case "ban":
 			_, _ = b.setNetworkBlock(ctx, u.TelegramID, true)
 			stop = true
@@ -1992,16 +2269,7 @@ func (b *Bot) missingBotRights(chatID int64) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	checks := []struct {
-		name string
-		ok   bool
-	}{{"change_info", member.CanChangeInfo}, {"delete_messages", member.CanDeleteMessages}, {"restrict_members", member.CanRestrictMembers}, {"invite_users", member.CanInviteUsers}, {"pin_messages", member.CanPinMessages}, {"promote_members", member.CanPromoteMembers}}
-	if chat.IsForum {
-		checks = append(checks, struct {
-			name string
-			ok   bool
-		}{"manage_topics", member.CanManageTopics})
-	}
+	checks := b.requiredGroupRights(member, chat.IsForum)
 	var missing []string
 	for _, check := range checks {
 		if !check.ok {
@@ -2009,6 +2277,23 @@ func (b *Bot) missingBotRights(chatID int64) ([]string, error) {
 		}
 	}
 	return missing, nil
+}
+
+func (b *Bot) requiredGroupRights(member tgbotapi.ChatMember, isForum bool) []struct {
+	name string
+	ok   bool
+} {
+	checks := []struct {
+		name string
+		ok   bool
+	}{{"change_info", member.CanChangeInfo}, {"delete_messages", member.CanDeleteMessages}, {"restrict_members", member.CanRestrictMembers}, {"invite_users", member.CanInviteUsers}, {"pin_messages", member.CanPinMessages}, {"promote_members", member.CanPromoteMembers}}
+	if isForum {
+		checks = append(checks, struct {
+			name string
+			ok   bool
+		}{"manage_topics", member.CanManageTopics})
+	}
+	return checks
 }
 
 func (b *Bot) syncGroupAdmins(ctx context.Context, chatID int64) []string {
@@ -2203,10 +2488,8 @@ func (b *Bot) sendInThread(chatID int64, threadID int, text string, kb *tgbotapi
 	if kb != nil {
 		m.ReplyMarkup = *kb
 	}
-	if sent, err := b.api.Send(m); err != nil {
+	if _, err := b.api.Send(m); err != nil {
 		b.logErr(err)
-	} else {
-		b.scheduleDelete(sent.Chat.ID, sent.MessageID)
 	}
 }
 func (b *Bot) sendOwnedInThread(chatID int64, threadID int, text string, kb *tgbotapi.InlineKeyboardMarkup, ownerID int64) {
@@ -2223,7 +2506,6 @@ func (b *Bot) sendOwnedInThread(chatID int64, threadID int, text string, kb *tgb
 		return
 	}
 	b.bindButtons(sent.Chat.ID, sent.MessageID, ownerID)
-	b.scheduleDelete(sent.Chat.ID, sent.MessageID)
 }
 func callbackMessageKey(chatID int64, messageID int) string {
 	return fmt.Sprintf("%d:%d", chatID, messageID)
@@ -2248,8 +2530,6 @@ func (b *Bot) edit(q *tgbotapi.CallbackQuery, text string, kb *tgbotapi.InlineKe
 	}
 	if _, err := b.api.Send(m); err != nil {
 		b.logErr(err)
-	} else {
-		b.scheduleDelete(q.Message.Chat.ID, q.Message.MessageID)
 	}
 }
 func (b *Bot) scheduleDelete(chatID int64, messageID int) {

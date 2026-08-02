@@ -27,6 +27,7 @@ type Config struct {
 	DatabasePath    string
 	AdminIDs        map[int64]struct{}
 	GitHubToken     string
+	OllamaURL       string
 	ProjectTargets  []ProjectTarget
 	ProjectsChannel PublishTarget
 	NetworkOwnerID  int64
@@ -37,6 +38,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		BotToken: os.Getenv("BOT_TOKEN"), DatabasePath: valueOr("DATABASE_PATH", "data/bot.db"),
 		AdminIDs: parseIDs(os.Getenv("ADMIN_IDS")), GitHubToken: os.Getenv("GITHUB_TOKEN"),
+		OllamaURL: valueOr("OLLAMA_URL", "http://127.0.0.1:1234"),
 	}
 	cfg.ProjectsChannel.ChatID, _ = strconv.ParseInt(os.Getenv("PROJECTS_CHANNEL_ID"), 10, 64)
 	cfg.NetworkOwnerID, _ = strconv.ParseInt(os.Getenv("NETWORK_OWNER_ID"), 10, 64)

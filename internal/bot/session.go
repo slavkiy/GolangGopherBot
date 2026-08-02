@@ -24,6 +24,7 @@ const (
 	stepAdminAutomationValue
 	stepAdminBroadcastText
 	stepAdminBroadcastConfirm
+	stepAIModel
 )
 
 type session struct {
@@ -40,6 +41,7 @@ type session struct {
 	BroadcastMode                                                                        string
 	BroadcastChatID                                                                      int64
 	BroadcastMessageID                                                                   int
+	AIRepoURL                                                                            string
 }
 type sessions struct {
 	mu   sync.RWMutex

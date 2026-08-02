@@ -166,3 +166,20 @@ func TestLooksLikeBroadcastHTML(t *testing.T) {
 		t.Fatal("plain comparison detected as HTML")
 	}
 }
+
+func TestExtractGitHubURL(t *testing.T) {
+	got := extractGitHubURL(`/ai https://github.com/acme/tool,`)
+	if got != "https://github.com/acme/tool" {
+		t.Fatalf("unexpected url: %q", got)
+	}
+	if got := extractGitHubURL("no repo here"); got != "" {
+		t.Fatalf("unexpected url from plain text: %q", got)
+	}
+}
+
+func TestGitHubURLFromMessage(t *testing.T) {
+	m := &tgbotapi.Message{Caption: "Смотри https://github.com/acme/tool"}
+	if got := githubURLFromMessage(m); got != "https://github.com/acme/tool" {
+		t.Fatalf("unexpected url: %q", got)
+	}
+}
