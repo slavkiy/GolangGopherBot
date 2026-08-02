@@ -18,6 +18,8 @@ const (
 	stepAdminWarn
 	stepAdminTag
 	stepAdminCommand
+	stepAdminBlock
+	stepAdminUnblock
 )
 
 type session struct {

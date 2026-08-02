@@ -187,6 +187,13 @@ func TestNetworkAdministration(t *testing.T) {
 	if err != nil || u.Role != "moderator" || u.Warns != 1 || u.Tags != "trusted,go" {
 		t.Fatalf("unexpected user: %+v %v", u, err)
 	}
+	if err = s.SetUserBlocked(ctx, 7, true); err != nil {
+		t.Fatal(err)
+	}
+	blocked, listErr := s.BlockedUsers(ctx)
+	if listErr != nil || len(blocked) != 1 || blocked[0].TelegramID != 7 {
+		t.Fatalf("unexpected block list: %+v %v", blocked, listErr)
+	}
 	if err = s.SaveCustomCommand(ctx, "hello", "Привет, {name}", 7); err != nil {
 		t.Fatal(err)
 	}

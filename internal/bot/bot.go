@@ -249,17 +249,26 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 	case stepAdminRole:
 		b.deleteAdminInput(m)
 		parts := strings.Fields(text)
-		if len(parts) != 2 {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Отправь: USER_ID ROLE", nil)
+		role, reference := "", ""
+		if m.ReplyToMessage != nil && len(parts) == 1 {
+			role = parts[0]
+		} else if len(parts) == 2 {
+			reference, role = parts[0], parts[1]
+		} else {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь на сообщение текстом ROLE или отправь: @username ROLE", nil)
 			return
 		}
-		id, err := strconv.ParseInt(parts[0], 10, 64)
 		valid := map[string]bool{"owner": true, "admin": true, "moderator": true, "member": true}
-		if err != nil || !valid[parts[1]] {
+		if !valid[role] {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Роль: owner, admin, moderator или member.", nil)
 			return
 		}
-		err = b.store.SetRole(ctx, id, parts[1])
+		target, err := b.resolveUserReference(ctx, m, reference)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
+			return
+		}
+		err = b.store.SetRole(ctx, target.TelegramID, role)
 		b.sessions.delete(u.TelegramID)
 		if err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь сначала должен открыть бота.", nil)
@@ -268,12 +277,12 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		}
 	case stepAdminWarn:
 		b.deleteAdminInput(m)
-		id, err := strconv.ParseInt(text, 10, 64)
+		target, err := b.resolveUserReference(ctx, m, text)
 		if err != nil {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Отправь Telegram ID.", nil)
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь на сообщение или отправь @username / ID.", nil)
 			return
 		}
-		err = b.store.AddWarn(ctx, id)
+		err = b.store.AddWarn(ctx, target.TelegramID)
 		b.sessions.delete(u.TelegramID)
 		if err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
@@ -282,16 +291,21 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		}
 	case stepAdminTag:
 		b.deleteAdminInput(m)
-		parts := strings.SplitN(text, " ", 2)
-		if len(parts) != 2 {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Отправь: USER_ID TAGS", nil)
-			return
+		reference, tags := "", text
+		if m.ReplyToMessage == nil {
+			parts := strings.SplitN(text, " ", 2)
+			if len(parts) != 2 {
+				b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь тегами на сообщение или отправь: @username TAGS", nil)
+				return
+			}
+			reference, tags = parts[0], parts[1]
 		}
-		id, err := strconv.ParseInt(parts[0], 10, 64)
+		target, err := b.resolveUserReference(ctx, m, reference)
 		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
 			return
 		}
-		err = b.store.SetTags(ctx, id, parts[1])
+		err = b.store.SetTags(ctx, target.TelegramID, tags)
 		b.sessions.delete(u.TelegramID)
 		if err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
@@ -312,6 +326,25 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Не удалось сохранить команду.", nil)
 		} else {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Команда /"+esc(name)+" сохранена.", nil)
+		}
+	case stepAdminBlock, stepAdminUnblock:
+		b.deleteAdminInput(m)
+		target, err := b.resolveUserReference(ctx, m, text)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь на сообщение или отправь @username / ID.", nil)
+			return
+		}
+		blocked := s.Step == stepAdminBlock
+		failures, err := b.setNetworkBlock(ctx, target.TelegramID, blocked)
+		b.sessions.delete(u.TelegramID)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
+		} else if len(failures) > 0 {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Статус сети обновлён, но не удалось применить действие в группах: "+esc(strings.Join(failures, ", ")), nil)
+		} else if blocked {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь заблокирован во всей сети.", nil)
+		} else {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь разблокирован во всей сети.", nil)
 		}
 	}
 }
@@ -469,19 +502,27 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		}
 	case "admrole":
 		if b.isOwner(u) {
-			b.startAdminSession(u, q, stepAdminRole, "Отправь: USER_ID ROLE", false)
+			b.startAdminSession(u, q, stepAdminRole, "Ответь на сообщение текстом ROLE или отправь: @username ROLE", false)
 		}
 	case "admwarn":
 		if b.canModerate(u) {
-			b.startAdminSession(u, q, stepAdminWarn, "Отправь Telegram ID пользователя.", false)
+			b.startAdminSession(u, q, stepAdminWarn, "Ответь на сообщение пользователя или отправь @username / Telegram ID.", false)
 		}
 	case "admtag":
 		if b.canModerate(u) {
-			b.startAdminSession(u, q, stepAdminTag, "Отправь: USER_ID TAGS", false)
+			b.startAdminSession(u, q, stepAdminTag, "Ответь тегами на сообщение пользователя или отправь: @username TAGS", false)
 		}
 	case "admcmd":
 		if b.canModerate(u) {
 			b.startAdminSession(u, q, stepAdminCommand, "Отправь: NAME ТЕКСТ. Переменные: {name}, {username}, {id}", false)
+		}
+	case "admblock":
+		if b.canModerate(u) {
+			b.startAdminSession(u, q, stepAdminBlock, "Ответь на сообщение пользователя или отправь @username / Telegram ID.", false)
+		}
+	case "admunblock":
+		if b.canModerate(u) {
+			b.startAdminSession(u, q, stepAdminUnblock, "Ответь на сообщение пользователя или отправь @username / Telegram ID.", false)
 		}
 	}
 }
@@ -937,20 +978,29 @@ func (b *Bot) adminProjectStatus(ctx context.Context, m *tgbotapi.Message, args 
 	b.sendInThread(m.Chat.ID, m.MessageThreadID, "Статус проекта обновлён.", nil)
 }
 func (b *Bot) adminBlock(ctx context.Context, m *tgbotapi.Message, args []string, blocked bool) {
-	if len(args) != 1 {
-		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Укажи Telegram ID пользователя.", nil)
+	reference := ""
+	if len(args) > 0 {
+		reference = args[0]
+	}
+	target, err := b.resolveUserReference(ctx, m, reference)
+	if err != nil {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ответь командой на сообщение или укажи @username / ID.", nil)
 		return
 	}
-	id, e := strconv.ParseInt(args[0], 10, 64)
-	if e != nil {
-		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Некорректный ID.", nil)
+	failures, err := b.setNetworkBlock(ctx, target.TelegramID, blocked)
+	if err != nil {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Не удалось обновить блокировку.", nil)
 		return
 	}
-	if e = b.store.SetUserBlocked(ctx, id, blocked); e != nil {
-		b.sendInThread(m.Chat.ID, m.MessageThreadID, e.Error(), nil)
+	if len(failures) > 0 {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Статус обновлён, ошибки в группах: "+esc(strings.Join(failures, ", ")), nil)
 		return
 	}
-	b.sendInThread(m.Chat.ID, m.MessageThreadID, "Статус пользователя обновлён.", nil)
+	if blocked {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь заблокирован во всей сети.", nil)
+	} else {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь разблокирован во всей сети.", nil)
+	}
 }
 func (b *Bot) adminHelp(chatID int64) {
 	b.send(chatID, "Админ-команды (работают и в группе):\n/stats\n/hideproject ID\n/showproject ID\n/block TELEGRAM_ID\n/unblock TELEGRAM_ID", nil)
@@ -1013,6 +1063,7 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 		if err = b.store.RegisterGroup(ctx, domain.RegisteredGroup{Name: args[1], ChatID: m.Chat.ID, ChatUsername: m.Chat.UserName}, u.TelegramID); err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Не удалось зарегистрировать группу.", nil)
 		} else {
+			b.syncBlockedUsers(ctx, m.Chat.ID)
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Группа зарегистрирована как участник сети.", nil)
 		}
 	case "syncadmins":
@@ -1035,37 +1086,64 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, fmt.Sprintf("Антиспам: %s", map[bool]string{true: "включён", false: "выключен"}[enabled]), nil)
 		}
 	case "role":
-		if !b.isOwner(u) || len(args) != 3 {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Формат для владельца: /admin role USER_ID owner|admin|moderator|member", nil)
+		if !b.isOwner(u) {
 			return
 		}
-		id, e := strconv.ParseInt(args[1], 10, 64)
+		reference, role := "", ""
+		if m.ReplyToMessage != nil && len(args) == 2 {
+			role = args[1]
+		} else if len(args) == 3 {
+			reference, role = args[1], args[2]
+		} else {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Reply: /admin role ROLE; либо /admin role @username ROLE", nil)
+			return
+		}
 		valid := map[string]bool{"owner": true, "admin": true, "moderator": true, "member": true}
-		if e != nil || !valid[args[2]] {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Некорректный ID или роль.", nil)
+		if !valid[role] {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Некорректная роль.", nil)
 			return
 		}
-		if e = b.store.SetRole(ctx, id, args[2]); e != nil {
+		target, e := b.resolveUserReference(ctx, m, reference)
+		if e != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
+			return
+		}
+		if e = b.store.SetRole(ctx, target.TelegramID, role); e != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь сначала должен открыть бота.", nil)
 		} else {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Роль обновлена.", nil)
 		}
 	case "warn":
-		if len(args) != 2 {
+		reference := ""
+		if len(args) > 1 {
+			reference = args[1]
+		}
+		target, err := b.resolveUserReference(ctx, m, reference)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Reply или @username / ID.", nil)
 			return
 		}
-		id, _ := strconv.ParseInt(args[1], 10, 64)
-		if err := b.store.AddWarn(ctx, id); err != nil {
+		if err := b.store.AddWarn(ctx, target.TelegramID); err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
 		} else {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Варн добавлен.", nil)
 		}
 	case "tag":
-		if len(args) < 3 {
+		reference, tags := "", ""
+		if m.ReplyToMessage != nil && len(args) >= 2 {
+			tags = strings.Join(args[1:], ",")
+		} else if len(args) >= 3 {
+			reference, tags = args[1], strings.Join(args[2:], ",")
+		} else {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Reply: /admin tag TAGS; либо /admin tag @username TAGS", nil)
 			return
 		}
-		id, _ := strconv.ParseInt(args[1], 10, 64)
-		if err := b.store.SetTags(ctx, id, strings.Join(args[2:], ",")); err != nil {
+		target, err := b.resolveUserReference(ctx, m, reference)
+		if err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
+			return
+		}
+		if err := b.store.SetTags(ctx, target.TelegramID, tags); err != nil {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден.", nil)
 		} else {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Теги обновлены.", nil)
@@ -1128,6 +1206,7 @@ func (b *Bot) adminCategory(u domain.User, q *tgbotapi.CallbackQuery, category s
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назначить роль", "admrole:start")))
 		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назначить теги", "admtag:start")))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Блокировать", "admblock:start"), tgbotapi.NewInlineKeyboardButtonData("Разблокировать", "admunblock:start")))
 	case "commands":
 		title = "Команды"
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новая команда", "admcmd:start")))
@@ -1186,7 +1265,8 @@ func (b *Bot) registerGroupFromButton(ctx context.Context, u domain.User, q *tgb
 	if err = b.store.RegisterGroup(ctx, domain.RegisteredGroup{Name: name, ChatID: chat.ID, ChatUsername: chat.UserName}, u.TelegramID); err != nil {
 		b.edit(q, "Не удалось зарегистрировать группу.", b.adminBackKeyboard())
 	} else {
-		b.edit(q, "Группа «"+esc(name)+"» зарегистрирована автоматически.", b.adminBackKeyboard())
+		b.syncBlockedUsers(ctx, chat.ID)
+		b.edit(q, "Группа \""+esc(name)+"\" зарегистрирована.", b.adminBackKeyboard())
 	}
 }
 func (b *Bot) deleteAdminInput(m *tgbotapi.Message) {
@@ -1296,6 +1376,16 @@ func (b *Bot) showRequestedUserInfo(ctx context.Context, current domain.User, m 
 		return
 	}
 	b.showUserInfo(ctx, target, m.Chat.ID, m.MessageThreadID)
+}
+func (b *Bot) resolveUserReference(ctx context.Context, m *tgbotapi.Message, reference string) (domain.User, error) {
+	if m.ReplyToMessage != nil && m.ReplyToMessage.From != nil {
+		return b.store.UserByTelegramID(ctx, m.ReplyToMessage.From.ID)
+	}
+	reference = strings.TrimSpace(reference)
+	if id, err := strconv.ParseInt(strings.TrimPrefix(reference, "@"), 10, 64); err == nil {
+		return b.store.UserByTelegramID(ctx, id)
+	}
+	return b.store.UserByUsername(ctx, reference)
 }
 func formatProfileTags(raw string) string {
 	if strings.TrimSpace(raw) == "" {
@@ -1448,6 +1538,41 @@ func (b *Bot) syncGroupAdmins(ctx context.Context, chatID int64) {
 		}
 		if _, err := b.api.Request(rights); err != nil {
 			b.logErr(fmt.Errorf("promote %d: %w", u.TelegramID, err))
+		}
+	}
+}
+func (b *Bot) setNetworkBlock(ctx context.Context, telegramID int64, blocked bool) ([]string, error) {
+	if err := b.store.SetUserBlocked(ctx, telegramID, blocked); err != nil {
+		return nil, err
+	}
+	groups, err := b.store.RegisteredGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var failures []string
+	for _, group := range groups {
+		member := tgbotapi.NewChatMember(group.ChatID, telegramID)
+		var request tgbotapi.Chattable
+		if blocked {
+			request = tgbotapi.BanChatMemberConfig{ChatMemberConfig: member, RevokeMessages: false}
+		} else {
+			request = tgbotapi.UnbanChatMemberConfig{ChatMemberConfig: member, OnlyIfBanned: true}
+		}
+		if _, requestErr := b.api.Request(request); requestErr != nil {
+			failures = append(failures, group.Name)
+			b.logErr(fmt.Errorf("network block in %s: %w", group.Name, requestErr))
+		}
+	}
+	return failures, nil
+}
+func (b *Bot) syncBlockedUsers(ctx context.Context, chatID int64) {
+	users, err := b.store.BlockedUsers(ctx)
+	if err != nil {
+		return
+	}
+	for _, u := range users {
+		if _, err = b.api.Request(tgbotapi.BanChatMemberConfig{ChatMemberConfig: tgbotapi.NewChatMember(chatID, u.TelegramID), RevokeMessages: false}); err != nil {
+			b.logErr(err)
 		}
 	}
 }

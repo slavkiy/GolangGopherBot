@@ -391,3 +391,19 @@ func (s *Store) PrivilegedUsers(ctx context.Context) ([]domain.User, error) {
 	}
 	return out, rows.Err()
 }
+func (s *Store) BlockedUsers(ctx context.Context) ([]domain.User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,telegram_id,username,first_name,last_name,language_code,is_blocked,role,tags,warns,activity_count,created_at,updated_at FROM users WHERE is_blocked=1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.User
+	for rows.Next() {
+		var u domain.User
+		if err := rows.Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsBlocked, &u.Role, &u.Tags, &u.Warns, &u.ActivityCount, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
