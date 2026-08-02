@@ -97,6 +97,12 @@ func (s *Store) UserByTelegramID(ctx context.Context, id int64) (domain.User, er
 	return u, err
 }
 
+func (s *Store) UserByUsername(ctx context.Context, username string) (domain.User, error) {
+	var u domain.User
+	err := s.db.QueryRowContext(ctx, `SELECT id,telegram_id,username,first_name,last_name,language_code,is_blocked,role,tags,warns,activity_count,created_at,updated_at FROM users WHERE LOWER(username)=LOWER(?)`, strings.TrimPrefix(strings.TrimSpace(username), "@")).Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsBlocked, &u.Role, &u.Tags, &u.Warns, &u.ActivityCount, &u.CreatedAt, &u.UpdatedAt)
+	return u, err
+}
+
 func (s *Store) CreateProject(ctx context.Context, p domain.Project) (domain.Project, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO projects(user_id,name,language,repo_url,repo_owner,repo_name,description,author_description,topics,stars,wants_contributors,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.UserID, p.Name, p.Language, p.RepoURL, p.RepoOwner, p.RepoName, p.Description, p.AuthorDescription, p.Topics, p.Stars, p.WantsContributors, domain.StatusPublished)
 	if err != nil {

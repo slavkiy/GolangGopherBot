@@ -22,6 +22,10 @@ func TestUserAndProjectFlow(t *testing.T) {
 	if u.ID == 0 || u.Username != "gopher" {
 		t.Fatalf("unexpected user: %+v", u)
 	}
+	byUsername, err := s.UserByUsername(ctx, "@GOPHER")
+	if err != nil || byUsername.TelegramID != 42 {
+		t.Fatalf("username lookup failed: %+v %v", byUsername, err)
+	}
 	p, err := s.CreateProject(ctx, domain.Project{UserID: u.ID, Name: "Tool", Language: "Go", RepoURL: "https://github.com/a/b", AuthorDescription: "Описание автора", Topics: "golang,telegram-bot", Stars: "12", WantsContributors: true})
 	if err != nil {
 		t.Fatal(err)

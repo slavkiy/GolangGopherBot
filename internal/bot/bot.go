@@ -149,7 +149,7 @@ func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Эта команда доступна только администраторам.", nil)
 		}
 	case "info":
-		b.showUserInfo(ctx, u, m.Chat.ID, m.MessageThreadID)
+		b.showRequestedUserInfo(ctx, u, m)
 	default:
 		if !b.runCustomCommand(ctx, m) {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Неизвестная команда. Открой /help.", nil)
@@ -891,7 +891,7 @@ func (b *Bot) groupCommand(ctx context.Context, u domain.User, m *tgbotapi.Messa
 		}
 	}
 	if m.Command() == "info" {
-		b.showUserInfo(ctx, u, m.Chat.ID, m.MessageThreadID)
+		b.showRequestedUserInfo(ctx, u, m)
 		return
 	}
 	if !b.canModerate(u) {
@@ -1278,6 +1278,24 @@ func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64, thr
 		b.logErr(err)
 	}
 	b.sendInThread(chatID, threadID, caption, nil)
+}
+func (b *Bot) showRequestedUserInfo(ctx context.Context, current domain.User, m *tgbotapi.Message) {
+	target := current
+	var err error
+	if m.ReplyToMessage != nil && m.ReplyToMessage.From != nil {
+		target, err = b.store.UserByTelegramID(ctx, m.ReplyToMessage.From.ID)
+	} else if argument := strings.TrimSpace(m.CommandArguments()); argument != "" {
+		if id, parseErr := strconv.ParseInt(strings.TrimPrefix(argument, "@"), 10, 64); parseErr == nil {
+			target, err = b.store.UserByTelegramID(ctx, id)
+		} else {
+			target, err = b.store.UserByUsername(ctx, argument)
+		}
+	}
+	if err != nil {
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь не найден в сети. Он должен сначала открыть бота или написать в подключённой группе.", nil)
+		return
+	}
+	b.showUserInfo(ctx, target, m.Chat.ID, m.MessageThreadID)
 }
 func formatProfileTags(raw string) string {
 	if strings.TrimSpace(raw) == "" {
