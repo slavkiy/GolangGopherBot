@@ -170,3 +170,31 @@ func TestNetworkAdministration(t *testing.T) {
 		t.Fatalf("unexpected command: %+v %v", cmd, err)
 	}
 }
+
+func TestRegisterAndSanctionGroup(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	registered := domain.RegisteredGroup{Name: "Go community", ChatID: -1001, ChatUsername: "@go"}
+	if err = s.RegisterGroup(ctx, registered, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RegisteredGroupByChat(ctx, -1001); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertNetworkGroup(ctx, domain.NetworkGroup{Name: "Projects", Language: "Go", ChatID: -1001, ThreadID: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SanctionGroup(ctx, -1001); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RegisteredGroupByChat(ctx, -1001); err == nil {
+		t.Fatal("sanctioned group remains registered")
+	}
+	if groups, err := s.NetworkGroups(ctx); err != nil || len(groups) != 0 {
+		t.Fatalf("route remains after sanction: %+v %v", groups, err)
+	}
+}

@@ -55,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, st
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
 	if err != nil {
 		return err
@@ -298,4 +299,48 @@ func (s *Store) CustomCommand(ctx context.Context, name string) (domain.CustomCo
 	var c domain.CustomCommand
 	err := s.db.QueryRowContext(ctx, `SELECT name,response FROM custom_commands WHERE name=?`, name).Scan(&c.Name, &c.Response)
 	return c, err
+}
+func (s *Store) RegisterGroup(ctx context.Context, g domain.RegisteredGroup, by int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO registered_groups(name,chat_id,chat_username,registered_by) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET name=excluded.name,chat_username=excluded.chat_username`, g.Name, g.ChatID, g.ChatUsername, by)
+	return err
+}
+func (s *Store) RegisteredGroupByChat(ctx context.Context, chatID int64) (domain.RegisteredGroup, error) {
+	var g domain.RegisteredGroup
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,chat_id,chat_username FROM registered_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername)
+	return g, err
+}
+func (s *Store) SanctionGroup(ctx context.Context, chatID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM network_groups WHERE chat_id=?`, chatID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM registered_groups WHERE chat_id=?`, chatID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("group not registered")
+	}
+	return tx.Commit()
+}
+func (s *Store) PrivilegedUsers(ctx context.Context) ([]domain.User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,telegram_id,username,first_name,last_name,language_code,is_blocked,role,tags,warns,activity_count,created_at,updated_at FROM users WHERE role IN ('owner','admin','moderator')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.User
+	for rows.Next() {
+		var u domain.User
+		if err := rows.Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.LastName, &u.LanguageCode, &u.IsBlocked, &u.Role, &u.Tags, &u.Warns, &u.ActivityCount, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }

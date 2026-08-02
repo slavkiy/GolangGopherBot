@@ -77,6 +77,9 @@ ID администратора должен быть указан в `ADMIN_IDS
 через `NETWORK_OWNER_ID`.
 
 - `/admin add NAME LANG` — выполнить внутри нужной темы, чтобы добавить группу и ветку в БД;
+- `/admin register NAME` — зарегистрировать группу как участника сети после проверки прав бота;
+- `/admin syncadmins` — выдать Telegram-права согласно ролям сети;
+- `/admin sanction` — безопасно исключить текущую группу из сети и вывести бота;
 - `/admin antispam` — переключить антиспам текущей группы;
 - `/admin role USER_ID ROLE` — назначить `owner`, `admin`, `moderator` или `member`;
 - `/admin warn USER_ID` — добавить варн;

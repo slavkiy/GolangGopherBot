@@ -20,6 +20,12 @@ type NetworkGroup struct {
 	ThreadID       int
 	AntiSpam       bool
 }
+type RegisteredGroup struct {
+	ID           int64
+	Name         string
+	ChatID       int64
+	ChatUsername string
+}
 type CustomCommand struct{ Name, Response string }
 
 type Project struct {

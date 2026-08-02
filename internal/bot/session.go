@@ -13,6 +13,12 @@ const (
 	stepConfirm
 	stepEditDescription
 	stepEditRepo
+	stepAdminRegister
+	stepAdminAddRoute
+	stepAdminRole
+	stepAdminWarn
+	stepAdminTag
+	stepAdminCommand
 )
 
 type session struct {
@@ -21,6 +27,9 @@ type session struct {
 	Stars                                                                                int
 	WantsContributors                                                                    bool
 	ProjectID                                                                            int64
+	AdminChatID                                                                          int64
+	AdminThreadID                                                                        int
+	AdminChatUsername                                                                    string
 }
 type sessions struct {
 	mu   sync.RWMutex
