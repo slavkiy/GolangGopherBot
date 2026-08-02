@@ -149,7 +149,7 @@ func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Эта команда доступна только администраторам.", nil)
 		}
 	case "info":
-		b.showUserInfo(ctx, u, m.Chat.ID)
+		b.showUserInfo(ctx, u, m.Chat.ID, m.MessageThreadID)
 	default:
 		if !b.runCustomCommand(ctx, m) {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Неизвестная команда. Открой /help.", nil)
@@ -891,7 +891,7 @@ func (b *Bot) groupCommand(ctx context.Context, u domain.User, m *tgbotapi.Messa
 		}
 	}
 	if m.Command() == "info" {
-		b.showUserInfo(ctx, u, m.Chat.ID)
+		b.showUserInfo(ctx, u, m.Chat.ID, m.MessageThreadID)
 		return
 	}
 	if !b.canModerate(u) {
@@ -1227,7 +1227,7 @@ func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.edit(q, text.String(), &kb)
 }
-func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64) {
+func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64, threadID int) {
 	count, _ := b.store.UserProjectCount(ctx, u.ID)
 	projects, _ := b.store.ListUserProjects(ctx, u.ID)
 	var names []string
@@ -1237,21 +1237,74 @@ func (b *Bot) showUserInfo(ctx context.Context, u domain.User, chatID int64) {
 		}
 		names = append(names, p.Name)
 	}
-	projectNames := "нет"
-	if len(names) > 0 {
-		projectNames = strings.Join(names, ", ")
-	}
 	role := u.Role
 	if b.isOwner(u) {
 		role = "owner"
 	} else if _, ok := b.cfg.AdminIDs[u.TelegramID]; ok && role == "member" {
 		role = "admin"
 	}
-	tags := u.Tags
-	if tags == "" {
-		tags = "нет"
+	roleNames := map[string]string{"owner": "Владелец сети", "admin": "Администратор", "moderator": "Модератор", "member": "Участник"}
+	if title := roleNames[role]; title != "" {
+		role = title
 	}
-	b.send(chatID, fmt.Sprintf("<b>Профиль сети</b>\nУровень: %s\nПроектов: %d (%s)\nАктивность: %d\nВарнов: %d\nТеги: %s", esc(role), count, esc(projectNames), u.ActivityCount, u.Warns, esc(tags)), nil)
+	displayName := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	if displayName == "" {
+		displayName = u.Username
+	}
+	username := ""
+	if u.Username != "" {
+		username = "\n@" + esc(u.Username)
+	}
+	tags := formatProfileTags(u.Tags)
+	projectBlock := "Нет добавленных проектов"
+	if len(names) > 0 {
+		var lines []string
+		for _, name := range names {
+			lines = append(lines, "• "+esc(name))
+		}
+		projectBlock = strings.Join(lines, "\n")
+	}
+	caption := fmt.Sprintf("<b>%s</b>%s\n\n<b>Уровень</b>\n%s\n\n<b>Проекты: %d</b>\n%s\n\n<b>Активность</b>: %d\n<b>Варны</b>: %d\n<b>Теги</b>: %s\n<b>Telegram ID</b>: <code>%d</code>", esc(displayName), username, esc(role), count, projectBlock, u.ActivityCount, u.Warns, tags, u.TelegramID)
+	photos, err := b.api.GetUserProfilePhotos(tgbotapi.NewUserProfilePhotos(u.TelegramID))
+	if err == nil && len(photos.Photos) > 0 && len(photos.Photos[0]) > 0 {
+		sizes := photos.Photos[0]
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(sizes[len(sizes)-1].FileID))
+		photo.Caption = caption
+		photo.ParseMode = "HTML"
+		photo.MessageThreadID = threadID
+		if _, err = b.api.Send(photo); err == nil {
+			return
+		}
+		b.logErr(err)
+	}
+	b.sendInThread(chatID, threadID, caption, nil)
+}
+func formatProfileTags(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "нет"
+	}
+	var out []string
+	for _, tag := range strings.Split(raw, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		var clean []rune
+		for _, r := range tag {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+				clean = append(clean, r)
+			} else if unicode.IsSpace(r) || r == '-' {
+				clean = append(clean, '_')
+			}
+		}
+		if len(clean) > 0 {
+			out = append(out, "#"+esc(string(clean)))
+		}
+	}
+	if len(out) == 0 {
+		return "нет"
+	}
+	return strings.Join(out, " ")
 }
 func (b *Bot) runCustomCommand(ctx context.Context, m *tgbotapi.Message) bool {
 	if !m.IsCommand() {

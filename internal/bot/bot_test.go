@@ -85,3 +85,13 @@ func TestChannelProjectLinksToGroup(t *testing.T) {
 		t.Fatalf("missing group link: %s", text)
 	}
 }
+
+func TestFormatProfileTags(t *testing.T) {
+	got := formatProfileTags("NETWORK OWNER, Go-admin, trusted")
+	if got != "#NETWORK_OWNER #Go_admin #trusted" {
+		t.Fatalf("unexpected tags: %s", got)
+	}
+	if got := formatProfileTags(" "); got != "нет" {
+		t.Fatalf("unexpected empty tags: %s", got)
+	}
+}
