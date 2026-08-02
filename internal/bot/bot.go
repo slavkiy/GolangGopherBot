@@ -144,7 +144,7 @@ func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
 		b.send(m.Chat.ID, "Заполнение отменено.", nil)
 	case "admin":
 		if b.canModerate(u) {
-			b.adminMenu(ctx, u, m.Chat.ID)
+			b.adminMenu(ctx, u, m.Chat.ID, m.MessageThreadID)
 		} else {
 			b.send(m.Chat.ID, "Эта команда доступна только администраторам.", nil)
 		}
@@ -968,7 +968,7 @@ func (b *Bot) isAdmin(id int64) bool { _, ok := b.cfg.AdminIDs[id]; return ok }
 
 func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Message, args []string) {
 	if len(args) == 0 {
-		b.adminMenu(ctx, u, m.Chat.ID)
+		b.adminMenu(ctx, u, m.Chat.ID, m.MessageThreadID)
 		return
 	}
 	switch args[0] {
@@ -1089,13 +1089,13 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 			b.send(m.Chat.ID, "Команда /"+esc(name)+" сохранена.", nil)
 		}
 	default:
-		b.adminMenu(ctx, u, m.Chat.ID)
+		b.adminMenu(ctx, u, m.Chat.ID, m.MessageThreadID)
 	}
 }
 
-func (b *Bot) adminMenu(ctx context.Context, u domain.User, chatID int64) {
+func (b *Bot) adminMenu(ctx context.Context, u domain.User, chatID int64, threadID int) {
 	kb := b.adminKeyboard(u)
-	b.send(chatID, "<b>Управление сетью</b>", &kb)
+	b.sendInThread(chatID, threadID, "<b>Управление сетью</b>", &kb)
 }
 func (b *Bot) adminMenuEdit(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery) {
 	kb := b.adminKeyboard(u)
@@ -1295,7 +1295,11 @@ func (b *Bot) syncGroupAdmins(ctx context.Context, chatID int64) {
 	}
 }
 func (b *Bot) send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) {
+	b.sendInThread(chatID, 0, text, kb)
+}
+func (b *Bot) sendInThread(chatID int64, threadID int, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	m := tgbotapi.NewMessage(chatID, text)
+	m.MessageThreadID = threadID
 	m.ParseMode = "HTML"
 	m.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
 	if kb != nil {
