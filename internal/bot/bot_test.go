@@ -122,3 +122,12 @@ func TestForwardedChannel(t *testing.T) {
 		t.Fatalf("accepted regular message: %+v", got)
 	}
 }
+
+func TestMessageHasLink(t *testing.T) {
+	if !messageHasLink(&tgbotapi.Message{Entities: []tgbotapi.MessageEntity{{Type: "url"}}}) {
+		t.Fatal("url was not detected")
+	}
+	if messageHasLink(&tgbotapi.Message{Entities: []tgbotapi.MessageEntity{{Type: "bold"}}}) {
+		t.Fatal("regular entity detected as link")
+	}
+}

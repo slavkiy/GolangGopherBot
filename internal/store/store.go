@@ -56,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,spam_limit INTEGER NOT NULL DEFAULT 6,spam_window INTEGER NOT NULL DEFAULT 10,spam_action TEXT NOT NULL DEFAULT 'delete_warn',created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',chat_type TEXT NOT NULL DEFAULT 'supergroup',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS automation_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER NOT NULL,event TEXT NOT NULL,action TEXT NOT NULL,value TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
 	if err != nil {
 		return err
@@ -331,6 +332,36 @@ func (s *Store) CustomCommand(ctx context.Context, name string) (domain.CustomCo
 	var c domain.CustomCommand
 	err := s.db.QueryRowContext(ctx, `SELECT name,response FROM custom_commands WHERE name=?`, name).Scan(&c.Name, &c.Response)
 	return c, err
+}
+func (s *Store) AddAutomationRule(ctx context.Context, r domain.AutomationRule, by int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO automation_rules(chat_id,event,action,value,created_by) VALUES(?,?,?,?,?)`, r.ChatID, r.Event, r.Action, r.Value, by)
+	return err
+}
+func (s *Store) AutomationRules(ctx context.Context, chatID int64, event string) ([]domain.AutomationRule, error) {
+	query := `SELECT id,chat_id,event,action,value,enabled FROM automation_rules WHERE chat_id=?`
+	args := []any{chatID}
+	if event != "" {
+		query += ` AND event=?`
+		args = append(args, event)
+	}
+	query += ` ORDER BY id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.AutomationRule
+	for rows.Next() {
+		var r domain.AutomationRule
+		if err := rows.Scan(&r.ID, &r.ChatID, &r.Event, &r.Action, &r.Value, &r.Enabled); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+func (s *Store) RemoveAutomationRule(ctx context.Context, id, chatID int64) error {
+	return requireChanged(s.db.ExecContext(ctx, `DELETE FROM automation_rules WHERE id=? AND chat_id=?`, id, chatID))
 }
 func (s *Store) RegisterGroup(ctx context.Context, g domain.RegisteredGroup, by int64) error {
 	if g.ChatType == "" {

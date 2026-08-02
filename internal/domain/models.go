@@ -31,6 +31,14 @@ type RegisteredGroup struct {
 	ChatType     string
 }
 type CustomCommand struct{ Name, Response string }
+type AutomationRule struct {
+	ID      int64
+	ChatID  int64
+	Event   string
+	Action  string
+	Value   string
+	Enabled bool
+}
 
 type Project struct {
 	ID                                                                                          int64

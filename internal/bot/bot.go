@@ -95,6 +95,9 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 	}
 	m := update.Message
 	if m.Chat.Type != "private" {
+		if b.handleAutomationEvents(ctx, m) {
+			return
+		}
 		if b.checkSpam(ctx, u, m) {
 			return
 		}
@@ -380,6 +383,18 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		} else {
 			b.sendInThread(m.Chat.ID, 0, "Канал зарегистрирован, роли синхронизированы во всей сети.", nil)
 		}
+	case stepAdminAutomationValue:
+		value := strings.TrimSpace(m.Text)
+		if s.AutomationAction == "send" && (value == "" || len([]rune(value)) > 1000) {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Текст должен быть от 1 до 1000 символов.", nil)
+			return
+		}
+		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: s.AdminChatID, Event: s.AutomationEvent, Action: s.AutomationAction, Value: value}, u.TelegramID); err != nil {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Не удалось сохранить событие.", nil)
+			return
+		}
+		b.sessions.delete(u.TelegramID)
+		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Событие сохранено.", nil)
 	}
 }
 
@@ -546,6 +561,31 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 			}
 			b.sessions.set(u.TelegramID, session{Step: stepAdminRegisterChannel})
 			b.edit(q, "Перешли сюда любую запись из канала. Бот возьмёт название и ID сам.", b.adminBackKeyboard())
+		}
+	case "admevents":
+		if b.canModerate(u) {
+			b.automationMenu(ctx, q)
+		}
+	case "admeventnew":
+		if b.canModerate(u) {
+			b.automationEventMenu(q)
+		}
+	case "admevent":
+		if b.canModerate(u) {
+			b.automationActionMenu(q, value)
+		}
+	case "admaction":
+		if b.canModerate(u) {
+			parts := strings.SplitN(value, ",", 2)
+			if len(parts) == 2 {
+				b.startAutomationAction(ctx, u, q, parts[0], parts[1])
+			}
+		}
+	case "admeventdel":
+		if b.canModerate(u) {
+			id, _ := strconv.ParseInt(value, 10, 64)
+			_ = b.store.RemoveAutomationRule(ctx, id, q.Message.Chat.ID)
+			b.automationMenu(ctx, q)
 		}
 	case "admadd":
 		if b.isOwner(u) {
@@ -1271,7 +1311,7 @@ func (b *Bot) adminCategory(u domain.User, q *tgbotapi.CallbackQuery, category s
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Блокировать", "admblock:start"), tgbotapi.NewInlineKeyboardButtonData("Разблокировать", "admunblock:start")))
 	case "commands":
 		title = "Команды"
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новая команда", "admcmd:start")))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новая команда", "admcmd:start"), tgbotapi.NewInlineKeyboardButtonData("События", "admevents:show")))
 	default:
 		b.adminMenuEdit(context.Background(), u, q)
 		return
@@ -1339,6 +1379,73 @@ func (b *Bot) deleteAdminInput(m *tgbotapi.Message) {
 func (b *Bot) adminBackKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
 	return &kb
+}
+func (b *Bot) automationMenu(ctx context.Context, q *tgbotapi.CallbackQuery) {
+	if q.Message.Chat.Type == "private" || q.Message.Chat.Type == "channel" {
+		b.edit(q, "События настраиваются в нужной группе сети.", b.adminBackKeyboard())
+		return
+	}
+	if _, err := b.store.RegisteredGroupByChat(ctx, q.Message.Chat.ID); err != nil {
+		b.edit(q, "Сначала зарегистрируй группу в сети.", b.adminBackKeyboard())
+		return
+	}
+	rules, err := b.store.AutomationRules(ctx, q.Message.Chat.ID, "")
+	if err != nil {
+		b.edit(q, "Не удалось загрузить события.", b.adminBackKeyboard())
+		return
+	}
+	events := map[string]string{"join": "Вход", "leave": "Выход", "message": "Сообщение", "command": "Команда", "photo": "Фото", "file": "Файл", "link": "Ссылка", "antispam": "Антиспам"}
+	actions := map[string]string{"send": "отправить текст", "delete": "удалить сообщение", "warn": "добавить варн", "ban": "бан во всей сети"}
+	text := "<b>События группы</b>"
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить событие", "admeventnew:show"))}
+	for _, r := range rules {
+		text += fmt.Sprintf("\n\n%d. %s → %s", r.ID, events[r.Event], actions[r.Action])
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Удалить "+strconv.FormatInt(r.ID, 10), "admeventdel:"+strconv.FormatInt(r.ID, 10))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:commands")))
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.edit(q, text, &kb)
+}
+func (b *Bot) automationEventMenu(q *tgbotapi.CallbackQuery) {
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Вход участника", "admevent:join"), tgbotapi.NewInlineKeyboardButtonData("Выход участника", "admevent:leave")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новое сообщение", "admevent:message"), tgbotapi.NewInlineKeyboardButtonData("Команда", "admevent:command")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Фото", "admevent:photo"), tgbotapi.NewInlineKeyboardButtonData("Файл", "admevent:file"), tgbotapi.NewInlineKeyboardButtonData("Ссылка", "admevent:link")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Срабатывание антиспама", "admevent:antispam")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevents:show")),
+	)
+	b.edit(q, "<b>Выбери событие</b>", &kb)
+}
+func (b *Bot) automationActionMenu(q *tgbotapi.CallbackQuery, event string) {
+	if !validAutomationEvent(event) {
+		return
+	}
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить текст", "admaction:"+event+",send"), tgbotapi.NewInlineKeyboardButtonData("Удалить сообщение", "admaction:"+event+",delete")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admaction:"+event+",warn"))}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Бан во всей сети", "admaction:"+event+",ban")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admeventnew:show")))
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.edit(q, "<b>Выбери действие</b>", &kb)
+}
+func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, event, action string) {
+	if !validAutomationEvent(event) || !map[string]bool{"send": true, "delete": true, "warn": true, "ban": true}[action] {
+		return
+	}
+	if action == "ban" && !b.isOwner(u) {
+		b.edit(q, "Сетевой бан может настраивать только владелец сети.", b.adminBackKeyboard())
+		return
+	}
+	if action != "send" {
+		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: q.Message.Chat.ID, Event: event, Action: action}, u.TelegramID); err != nil {
+			b.edit(q, "Не удалось сохранить событие.", b.adminBackKeyboard())
+			return
+		}
+		b.edit(q, "Событие сохранено.", b.adminBackKeyboard())
+		return
+	}
+	b.sessions.set(u.TelegramID, session{Step: stepAdminAutomationValue, AdminChatID: q.Message.Chat.ID, AutomationEvent: event, AutomationAction: action})
+	b.edit(q, "Отправь текст. Переменные: {name}, {username}, {id}, {group}.", b.adminBackKeyboard())
+}
+func validAutomationEvent(event string) bool {
+	return map[string]bool{"join": true, "leave": true, "message": true, "command": true, "photo": true, "file": true, "link": true, "antispam": true}[event]
 }
 func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	registered, err := b.store.RegisteredGroups(ctx)
@@ -1530,7 +1637,92 @@ func (b *Bot) checkSpam(ctx context.Context, u domain.User, m *tgbotapi.Message)
 	if g.SpamAction == "delete_warn" {
 		_ = b.store.AddWarn(ctx, u.TelegramID)
 	}
+	b.runAutomations(ctx, m, u, "antispam")
 	return true
+}
+
+func (b *Bot) handleAutomationEvents(ctx context.Context, m *tgbotapi.Message) bool {
+	if len(m.NewChatMembers) > 0 {
+		for _, member := range m.NewChatMembers {
+			u, err := b.store.UpsertUser(ctx, domain.User{TelegramID: member.ID, Username: member.UserName, FirstName: member.FirstName, LastName: member.LastName, LanguageCode: member.LanguageCode})
+			if err == nil {
+				b.runAutomations(ctx, m, u, "join")
+			}
+		}
+		return true
+	}
+	if m.LeftChatMember != nil {
+		u, err := b.store.UserByTelegramID(ctx, m.LeftChatMember.ID)
+		if err != nil {
+			u = domain.User{TelegramID: m.LeftChatMember.ID, Username: m.LeftChatMember.UserName, FirstName: m.LeftChatMember.FirstName, LastName: m.LeftChatMember.LastName}
+		}
+		b.runAutomations(ctx, m, u, "leave")
+		return true
+	}
+	if m.From == nil || m.From.IsBot {
+		return false
+	}
+	u, err := b.store.UserByTelegramID(ctx, m.From.ID)
+	if err != nil {
+		return false
+	}
+	event := "message"
+	if m.IsCommand() {
+		event = "command"
+	} else if len(m.Photo) > 0 {
+		event = "photo"
+	} else if m.Document != nil {
+		event = "file"
+	} else if messageHasLink(m) {
+		event = "link"
+	}
+	return b.runAutomations(ctx, m, u, event)
+}
+func messageHasLink(m *tgbotapi.Message) bool {
+	for _, entity := range append(m.Entities, m.CaptionEntities...) {
+		if entity.Type == "url" || entity.Type == "text_link" {
+			return true
+		}
+	}
+	return false
+}
+func (b *Bot) runAutomations(ctx context.Context, m *tgbotapi.Message, u domain.User, event string) bool {
+	rules, err := b.store.AutomationRules(ctx, m.Chat.ID, event)
+	if err != nil {
+		b.logErr(err)
+		return false
+	}
+	stop := false
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		if b.canModerate(u) && rule.Action != "send" {
+			continue
+		}
+		switch rule.Action {
+		case "send":
+			name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+			if name == "" {
+				name = u.Username
+			}
+			username := ""
+			if u.Username != "" {
+				username = "@" + u.Username
+			}
+			text := strings.NewReplacer("{name}", esc(name), "{username}", esc(username), "{id}", strconv.FormatInt(u.TelegramID, 10), "{group}", esc(m.Chat.Title)).Replace(rule.Value)
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, text, nil)
+		case "delete":
+			_, _ = b.api.Request(tgbotapi.NewDeleteMessage(m.Chat.ID, m.MessageID))
+			stop = true
+		case "warn":
+			_ = b.store.AddWarn(ctx, u.TelegramID)
+		case "ban":
+			_, _ = b.setNetworkBlock(ctx, u.TelegramID, true)
+			stop = true
+		}
+	}
+	return stop
 }
 
 func (b *Bot) missingBotRights(chatID int64) ([]string, error) {

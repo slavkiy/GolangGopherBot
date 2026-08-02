@@ -109,6 +109,30 @@ func TestRegisteredChatType(t *testing.T) {
 	}
 }
 
+func TestAutomationRules(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	rule := domain.AutomationRule{ChatID: -1001, Event: "join", Action: "send", Value: "Привет, {name}"}
+	if err = s.AddAutomationRule(ctx, rule, 7); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := s.AutomationRules(ctx, -1001, "join")
+	if err != nil || len(rules) != 1 || rules[0].Value != rule.Value {
+		t.Fatalf("unexpected rules: %+v %v", rules, err)
+	}
+	if err = s.RemoveAutomationRule(ctx, rules[0].ID, -1001); err != nil {
+		t.Fatal(err)
+	}
+	rules, err = s.AutomationRules(ctx, -1001, "")
+	if err != nil || len(rules) != 0 {
+		t.Fatalf("rule was not removed: %+v %v", rules, err)
+	}
+}
+
 func TestOwnerCanUpdateAndCloseProject(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
 	if err != nil {

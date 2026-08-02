@@ -21,6 +21,7 @@ const (
 	stepAdminBlock
 	stepAdminUnblock
 	stepAdminRegisterChannel
+	stepAdminAutomationValue
 )
 
 type session struct {
@@ -32,6 +33,7 @@ type session struct {
 	AdminChatID                                                                          int64
 	AdminThreadID                                                                        int
 	AdminChatUsername                                                                    string
+	AutomationEvent, AutomationAction                                                    string
 }
 type sessions struct {
 	mu   sync.RWMutex
