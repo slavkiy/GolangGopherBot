@@ -91,9 +91,13 @@ func (s *Service) AvailableModels(ctx context.Context) ([]Model, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	models := make([]struct{ Name string `json:"name"` }, 0, len(data.Data))
+	models := make([]struct {
+		Name string `json:"name"`
+	}, 0, len(data.Data))
 	for _, item := range data.Data {
-		models = append(models, struct{ Name string `json:"name"` }{Name: item.ID})
+		models = append(models, struct {
+			Name string `json:"name"`
+		}{Name: item.ID})
 	}
 	return s.preferredModels(ctx, models), nil
 }
@@ -111,36 +115,36 @@ func (s *Service) Review(ctx context.Context, repoURL, model string) (ReviewResu
 
 func (s *Service) ReviewStream(ctx context.Context, repoURL, model string, onProgress func(Progress) error) (ReviewResult, error) {
 	if onProgress != nil {
-		_ = onProgress(Progress{Status: "20% Получаю данные GitHub"})
+		_ = onProgress(Progress{Status: "1/5 Получаю данные GitHub"})
 	}
 	repo, err := s.github.Fetch(ctx, repoURL)
 	if err != nil {
 		return ReviewResult{}, err
 	}
 	if onProgress != nil {
-		_ = onProgress(Progress{Status: "40% Скачиваю архив репозитория"})
+		_ = onProgress(Progress{Status: "2/5 Скачиваю архив репозитория"})
 	}
 	archive, info, err := s.downloadArchive(ctx, repo.URL, repo.Owner, repo.Name)
 	if err != nil {
 		return ReviewResult{}, err
 	}
 	if onProgress != nil {
-		_ = onProgress(Progress{Status: "40% Архив скачан: " + humanBytes(info.SizeBytes)})
-		_ = onProgress(Progress{Status: "60% Собираю срез проекта"})
+		_ = onProgress(Progress{Status: "2/5 Архив скачан: " + humanBytes(info.SizeBytes)})
+		_ = onProgress(Progress{Status: "3/5 Собираю срез проекта"})
 	}
 	snap, err := buildSnapshot(archive)
 	if err != nil {
 		return ReviewResult{}, err
 	}
 	if onProgress != nil {
-		_ = onProgress(Progress{Status: fmt.Sprintf("60%% Найдено файлов: %d, кода: %d, тестов: %d, картинок: %d", snap.FileCount, snap.CodeFiles, snap.TestFiles, snap.ImageFiles)})
+		_ = onProgress(Progress{Status: fmt.Sprintf("3/5 Найдено файлов: %d, кода: %d, тестов: %d, картинок: %d", snap.FileCount, snap.CodeFiles, snap.TestFiles, snap.ImageFiles)})
 	}
 	prompt := buildPrompt(repo, snap)
 	useVision := s.modelHasVision(ctx, model)
 	if onProgress != nil {
-		status := "80% Запускаю обзор модели"
+		status := "4/5 Запускаю обзор модели"
 		if useVision && snap.ImageFiles > 0 {
-			status = "80% Запускаю обзор модели с кодом и картинками"
+			status = "4/5 Запускаю обзор модели с кодом и картинками"
 		}
 		_ = onProgress(Progress{Status: status})
 	}
@@ -150,20 +154,20 @@ func (s *Service) ReviewStream(ctx context.Context, repoURL, model string, onPro
 	}
 	result := ReviewResult{Model: model, Text: strings.TrimSpace(text), Vision: useVision}
 	if onProgress != nil {
-		_ = onProgress(Progress{Status: "95% Готовлю итог"})
+		_ = onProgress(Progress{Status: "5/5 Готовлю итог"})
 		_ = onProgress(Progress{Done: true, Text: result.Text})
 	}
 	return result, nil
 }
 
-func (s *Service) preferredModels(ctx context.Context, models []struct{ Name string `json:"name"` }) []Model {
+func (s *Service) preferredModels(ctx context.Context, models []struct {
+	Name string `json:"name"`
+}) []Model {
 	preferred := []struct {
 		key   string
 		label string
 	}{
-		{key: "qwen", label: "Qwen"},
 		{key: "gemma", label: "Gemma"},
-		{key: "dolphin", label: "Dolphin"},
 	}
 	var result []Model
 	used := make(map[string]bool)
