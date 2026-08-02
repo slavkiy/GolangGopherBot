@@ -37,6 +37,9 @@ type session struct {
 	AdminChatUsername                                                                    string
 	AutomationEvent, AutomationAction                                                    string
 	BroadcastScope, BroadcastText                                                        string
+	BroadcastMode                                                                        string
+	BroadcastChatID                                                                      int64
+	BroadcastMessageID                                                                   int
 }
 type sessions struct {
 	mu   sync.RWMutex

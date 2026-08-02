@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,14 +400,29 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Событие сохранено.", nil)
 	case stepAdminBroadcastText:
 		text := strings.TrimSpace(m.Text)
-		if text == "" || len([]rune(text)) > 3500 {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Текст должен быть от 1 до 3500 символов.", nil)
-			return
+		if text != "" && len(m.Entities) == 0 && looksLikeBroadcastHTML(text) {
+			if len([]rune(text)) > 3500 {
+				b.sendInThread(m.Chat.ID, m.MessageThreadID, "HTML-текст должен быть до 3500 символов.", nil)
+				return
+			}
+			if err := validateBroadcastHTML(text); err != nil {
+				b.sendInThread(m.Chat.ID, m.MessageThreadID, "Ошибка HTML: "+esc(err.Error())+"\nИсправь разметку и отправь сообщение ещё раз.", nil)
+				return
+			}
+			s.BroadcastMode, s.BroadcastText = "html", text
+		} else {
+			s.BroadcastMode, s.BroadcastChatID, s.BroadcastMessageID = "copy", m.Chat.ID, m.MessageID
 		}
-		s.BroadcastText, s.Step = text, stepAdminBroadcastConfirm
+		s.Step = stepAdminBroadcastConfirm
 		b.sessions.set(u.TelegramID, s)
 		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить", "admbroadcastsend:run"), tgbotapi.NewInlineKeyboardButtonData("Отмена", "admmenu:show")))
-		b.sendOwnedInThread(m.Chat.ID, m.MessageThreadID, "<b>Предпросмотр рассылки</b>\nПолучатели: "+broadcastScopeName(s.BroadcastScope)+"\n\n"+esc(text), &kb, u.TelegramID)
+		preview := "<b>Предпросмотр рассылки</b>\nПолучатели: " + broadcastScopeName(s.BroadcastScope)
+		if s.BroadcastMode == "html" {
+			preview += "\n\n" + text
+		} else {
+			preview += "\n\nБудет скопировано сообщение выше со всеми медиа и форматированием Telegram."
+		}
+		b.sendOwnedInThread(m.Chat.ID, m.MessageThreadID, preview, &kb, u.TelegramID)
 	}
 }
 
@@ -579,7 +597,7 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 	case "admbroadcastscope":
 		if b.isOwner(u) && validBroadcastScope(value) {
 			b.sessions.set(u.TelegramID, session{Step: stepAdminBroadcastText, BroadcastScope: value})
-			b.edit(q, "Отправь текст рассылки (до 3500 символов). Перед отправкой будет предпросмотр.", b.adminBackKeyboard())
+			b.edit(q, "Отправь сообщение для рассылки. Поддерживаются текст, фото, видео, анимации, документы, аудио, голосовые, видеосообщения, стикеры, опросы и подписи. Форматирование Telegram и Premium emoji сохраняются.\n\nДля ручного HTML: &lt;b&gt;, &lt;i&gt;, &lt;u&gt;, &lt;s&gt;, &lt;code&gt;, &lt;pre&gt;, &lt;blockquote&gt;, &lt;tg-spoiler&gt;, &lt;tg-emoji emoji-id=\"...\"&gt;, &lt;a href=\"https://...\"&gt;.", b.adminBackKeyboard())
 		}
 	case "admbroadcastsend":
 		if b.isOwner(u) {
@@ -588,7 +606,7 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 				return
 			}
 			b.sessions.delete(u.TelegramID)
-			sent, failures := b.sendBroadcast(ctx, s.BroadcastScope, s.BroadcastText)
+			sent, failures := b.sendBroadcast(ctx, s)
 			result := fmt.Sprintf("Рассылка завершена. Отправлено: %d.", sent)
 			if len(failures) > 0 {
 				result += "\nОшибки:\n" + esc(strings.Join(failures, "\n"))
@@ -1461,7 +1479,66 @@ func validBroadcastScope(scope string) bool {
 func broadcastScopeName(scope string) string {
 	return map[string]string{"all": "вся сеть", "groups": "только группы", "channels": "только каналы"}[scope]
 }
-func (b *Bot) sendBroadcast(ctx context.Context, scope, text string) (int, []string) {
+func validateBroadcastHTML(text string) error {
+	decoder := xml.NewDecoder(strings.NewReader("<root>" + text + "</root>"))
+	allowed := map[string]bool{"root": true, "b": true, "strong": true, "i": true, "em": true, "u": true, "ins": true, "s": true, "strike": true, "del": true, "code": true, "pre": true, "blockquote": true, "tg-spoiler": true, "span": true, "a": true, "tg-emoji": true}
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("теги не закрыты или символ & не экранирован")
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		name := start.Name.Local
+		if !allowed[name] {
+			return fmt.Errorf("тег <%s> не поддерживается", name)
+		}
+		for _, attr := range start.Attr {
+			if !validBroadcastAttribute(name, attr.Name.Local, attr.Value) {
+				return fmt.Errorf("атрибут %s у тега <%s> не поддерживается", attr.Name.Local, name)
+			}
+		}
+	}
+}
+func looksLikeBroadcastHTML(text string) bool {
+	lower := strings.ToLower(text)
+	for _, tag := range []string{"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "blockquote", "tg-spoiler", "span", "a", "tg-emoji"} {
+		if strings.Contains(lower, "<"+tag+">") || strings.Contains(lower, "<"+tag+" ") || strings.Contains(lower, "</"+tag+">") {
+			return true
+		}
+	}
+	return false
+}
+func validBroadcastAttribute(tag, name, value string) bool {
+	switch tag {
+	case "a":
+		if name != "href" {
+			return false
+		}
+		u, err := url.Parse(strings.TrimSpace(value))
+		return err == nil && (u.Scheme == "https" || u.Scheme == "http" || u.Scheme == "tg" || u.Scheme == "mailto")
+	case "span":
+		return name == "class" && value == "tg-spoiler"
+	case "code":
+		return name == "class" && strings.HasPrefix(value, "language-") && len(value) > len("language-")
+	case "blockquote":
+		return name == "expandable" && (value == "" || value == "expandable" || value == "true")
+	case "tg-emoji":
+		if name != "emoji-id" {
+			return false
+		}
+		_, err := strconv.ParseInt(value, 10, 64)
+		return err == nil
+	default:
+		return false
+	}
+}
+func (b *Bot) sendBroadcast(ctx context.Context, s session) (int, []string) {
 	chats, err := b.store.RegisteredGroups(ctx)
 	if err != nil {
 		return 0, []string{err.Error()}
@@ -1470,13 +1547,20 @@ func (b *Bot) sendBroadcast(ctx context.Context, scope, text string) (int, []str
 	var failures []string
 	for _, chat := range chats {
 		isChannel := chat.ChatType == "channel"
-		if scope == "groups" && isChannel || scope == "channels" && !isChannel {
+		if s.BroadcastScope == "groups" && isChannel || s.BroadcastScope == "channels" && !isChannel {
 			continue
 		}
-		msg := tgbotapi.NewMessage(chat.ChatID, esc(text))
-		msg.ParseMode = "HTML"
-		msg.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
-		if _, sendErr := b.api.Send(msg); sendErr != nil {
+		var sendErr error
+		if s.BroadcastMode == "copy" {
+			copyMessage := tgbotapi.NewCopyMessage(chat.ChatID, s.BroadcastChatID, s.BroadcastMessageID)
+			_, sendErr = b.api.Request(copyMessage)
+		} else {
+			msg := tgbotapi.NewMessage(chat.ChatID, s.BroadcastText)
+			msg.ParseMode = "HTML"
+			msg.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
+			_, sendErr = b.api.Send(msg)
+		}
+		if sendErr != nil {
 			failures = append(failures, chat.Name+": "+sendErr.Error())
 			b.logErr(fmt.Errorf("broadcast to %s: %w", chat.Name, sendErr))
 			continue

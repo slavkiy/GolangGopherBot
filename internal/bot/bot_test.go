@@ -142,3 +142,27 @@ func TestBroadcastScopes(t *testing.T) {
 		t.Fatal("accepted unsupported scope")
 	}
 }
+
+func TestValidateBroadcastHTML(t *testing.T) {
+	valid := []string{"Обычный текст", `<b>Важно</b> <a href="https://example.com">ссылка</a>`, `<pre><code class="language-go">fmt.Println(&quot;ok&quot;)</code></pre>`, `<span class="tg-spoiler">секрет</span>`, `<tg-emoji emoji-id="5368324170671202286">x</tg-emoji>`}
+	for _, value := range valid {
+		if err := validateBroadcastHTML(value); err != nil {
+			t.Errorf("valid HTML rejected %q: %v", value, err)
+		}
+	}
+	invalid := []string{`<b>не закрыт`, `<script>alert(1)</script>`, `<a href="javascript:alert(1)">x</a>`, `<b onclick="x">x</b>`, `один & два`}
+	for _, value := range invalid {
+		if err := validateBroadcastHTML(value); err == nil {
+			t.Errorf("invalid HTML accepted: %q", value)
+		}
+	}
+}
+
+func TestLooksLikeBroadcastHTML(t *testing.T) {
+	if !looksLikeBroadcastHTML(`<b>текст</b>`) {
+		t.Fatal("HTML was not detected")
+	}
+	if looksLikeBroadcastHTML(`2 < 3`) {
+		t.Fatal("plain comparison detected as HTML")
+	}
+}
