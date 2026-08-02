@@ -564,28 +564,49 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		}
 	case "admevents":
 		if b.canModerate(u) {
-			b.automationMenu(ctx, q)
+			b.automationScopeMenu(u, q)
 		}
-	case "admeventnew":
-		if b.canModerate(u) {
-			b.automationEventMenu(q)
+	case "admeventscope":
+		if b.canModerate(u) && (value == "local" || value == "global") {
+			if value == "global" && !b.isOwner(u) {
+				return
+			}
+			b.automationMenu(ctx, u, q, value)
 		}
 	case "admevent":
 		if b.canModerate(u) {
-			b.automationActionMenu(q, value)
+			parts := strings.SplitN(value, ",", 2)
+			if len(parts) == 2 && (parts[0] == "local" || parts[0] == "global") {
+				if parts[0] == "global" && !b.isOwner(u) {
+					return
+				}
+				b.automationActionMenu(q, parts[0], parts[1])
+			}
 		}
 	case "admaction":
 		if b.canModerate(u) {
-			parts := strings.SplitN(value, ",", 2)
-			if len(parts) == 2 {
-				b.startAutomationAction(ctx, u, q, parts[0], parts[1])
+			parts := strings.SplitN(value, ",", 3)
+			if len(parts) == 3 {
+				b.startAutomationAction(ctx, u, q, parts[0], parts[1], parts[2])
 			}
 		}
 	case "admeventdel":
 		if b.canModerate(u) {
-			id, _ := strconv.ParseInt(value, 10, 64)
-			_ = b.store.RemoveAutomationRule(ctx, id, q.Message.Chat.ID)
-			b.automationMenu(ctx, q)
+			parts := strings.SplitN(value, ",", 2)
+			if len(parts) != 2 {
+				return
+			}
+			scope, idText := parts[0], parts[1]
+			if scope == "global" && !b.isOwner(u) {
+				return
+			}
+			chatID := q.Message.Chat.ID
+			if scope == "global" {
+				chatID = 0
+			}
+			id, _ := strconv.ParseInt(idText, 10, 64)
+			_ = b.store.RemoveAutomationRule(ctx, id, chatID)
+			b.automationMenu(ctx, u, q, scope)
 		}
 	case "admadd":
 		if b.isOwner(u) {
@@ -1380,52 +1401,80 @@ func (b *Bot) adminBackKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
 	return &kb
 }
-func (b *Bot) automationMenu(ctx context.Context, q *tgbotapi.CallbackQuery) {
-	if q.Message.Chat.Type == "private" || q.Message.Chat.Type == "channel" {
-		b.edit(q, "События настраиваются в нужной группе сети.", b.adminBackKeyboard())
-		return
+func (b *Bot) automationScopeMenu(u domain.User, q *tgbotapi.CallbackQuery) {
+	rows := [][]tgbotapi.InlineKeyboardButton{}
+	if q.Message.Chat.Type != "private" && q.Message.Chat.Type != "channel" {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Локальные для группы", "admeventscope:local")))
 	}
-	if _, err := b.store.RegisteredGroupByChat(ctx, q.Message.Chat.ID); err != nil {
-		b.edit(q, "Сначала зарегистрируй группу в сети.", b.adminBackKeyboard())
-		return
+	if b.isOwner(u) {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Глобальные для сети", "admeventscope:global")))
 	}
-	rules, err := b.store.AutomationRules(ctx, q.Message.Chat.ID, "")
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:commands")))
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.edit(q, "<b>Область событий</b>\n\nЛокальные работают только в одной группе. Глобальные работают во всех группах сети.", &kb)
+}
+func (b *Bot) automationMenu(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, scope string) {
+	chatID := q.Message.Chat.ID
+	if scope == "global" {
+		if !b.isOwner(u) {
+			return
+		}
+		chatID = 0
+	} else {
+		if q.Message.Chat.Type == "private" || q.Message.Chat.Type == "channel" {
+			b.edit(q, "Локальные события настраиваются внутри нужной группы.", b.adminBackKeyboard())
+			return
+		}
+		if _, err := b.store.RegisteredGroupByChat(ctx, chatID); err != nil {
+			b.edit(q, "Сначала зарегистрируй группу в сети.", b.adminBackKeyboard())
+			return
+		}
+	}
+	rules, err := b.store.AutomationRules(ctx, chatID, "")
 	if err != nil {
 		b.edit(q, "Не удалось загрузить события.", b.adminBackKeyboard())
 		return
 	}
 	events := map[string]string{"join": "Вход", "leave": "Выход", "message": "Сообщение", "command": "Команда", "photo": "Фото", "file": "Файл", "link": "Ссылка", "antispam": "Антиспам"}
 	actions := map[string]string{"send": "отправить текст", "delete": "удалить сообщение", "warn": "добавить варн", "ban": "бан во всей сети"}
-	text := "<b>События группы</b>"
-	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить событие", "admeventnew:show"))}
+	title := "Локальные события группы"
+	if scope == "global" {
+		title = "Глобальные события сети"
+	}
+	text := "<b>" + title + "</b>"
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить событие", "admevent:"+scope+",choose"))}
 	for _, r := range rules {
 		text += fmt.Sprintf("\n\n%d. %s → %s", r.ID, events[r.Event], actions[r.Action])
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Удалить "+strconv.FormatInt(r.ID, 10), "admeventdel:"+strconv.FormatInt(r.ID, 10))))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Удалить "+strconv.FormatInt(r.ID, 10), "admeventdel:"+scope+","+strconv.FormatInt(r.ID, 10))))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:commands")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevents:show")))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.edit(q, text, &kb)
 }
-func (b *Bot) automationEventMenu(q *tgbotapi.CallbackQuery) {
+func (b *Bot) automationEventMenu(q *tgbotapi.CallbackQuery, scope string) {
 	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Вход участника", "admevent:join"), tgbotapi.NewInlineKeyboardButtonData("Выход участника", "admevent:leave")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новое сообщение", "admevent:message"), tgbotapi.NewInlineKeyboardButtonData("Команда", "admevent:command")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Фото", "admevent:photo"), tgbotapi.NewInlineKeyboardButtonData("Файл", "admevent:file"), tgbotapi.NewInlineKeyboardButtonData("Ссылка", "admevent:link")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Срабатывание антиспама", "admevent:antispam")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevents:show")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Вход участника", "admevent:"+scope+",join"), tgbotapi.NewInlineKeyboardButtonData("Выход участника", "admevent:"+scope+",leave")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Новое сообщение", "admevent:"+scope+",message"), tgbotapi.NewInlineKeyboardButtonData("Команда", "admevent:"+scope+",command")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Фото", "admevent:"+scope+",photo"), tgbotapi.NewInlineKeyboardButtonData("Файл", "admevent:"+scope+",file"), tgbotapi.NewInlineKeyboardButtonData("Ссылка", "admevent:"+scope+",link")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Срабатывание антиспама", "admevent:"+scope+",antispam")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admeventscope:"+scope)),
 	)
 	b.edit(q, "<b>Выбери событие</b>", &kb)
 }
-func (b *Bot) automationActionMenu(q *tgbotapi.CallbackQuery, event string) {
+func (b *Bot) automationActionMenu(q *tgbotapi.CallbackQuery, scope, event string) {
+	if event == "choose" {
+		b.automationEventMenu(q, scope)
+		return
+	}
 	if !validAutomationEvent(event) {
 		return
 	}
-	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить текст", "admaction:"+event+",send"), tgbotapi.NewInlineKeyboardButtonData("Удалить сообщение", "admaction:"+event+",delete")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admaction:"+event+",warn"))}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Бан во всей сети", "admaction:"+event+",ban")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admeventnew:show")))
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить текст", "admaction:"+scope+","+event+",send"), tgbotapi.NewInlineKeyboardButtonData("Удалить сообщение", "admaction:"+scope+","+event+",delete")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить варн", "admaction:"+scope+","+event+",warn"))}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Бан во всей сети", "admaction:"+scope+","+event+",ban")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admevent:"+scope+",choose")))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.edit(q, "<b>Выбери действие</b>", &kb)
 }
-func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, event, action string) {
+func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbotapi.CallbackQuery, scope, event, action string) {
 	if !validAutomationEvent(event) || !map[string]bool{"send": true, "delete": true, "warn": true, "ban": true}[action] {
 		return
 	}
@@ -1433,15 +1482,22 @@ func (b *Bot) startAutomationAction(ctx context.Context, u domain.User, q *tgbot
 		b.edit(q, "Сетевой бан может настраивать только владелец сети.", b.adminBackKeyboard())
 		return
 	}
+	if scope == "global" && !b.isOwner(u) {
+		return
+	}
+	chatID := q.Message.Chat.ID
+	if scope == "global" {
+		chatID = 0
+	}
 	if action != "send" {
-		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: q.Message.Chat.ID, Event: event, Action: action}, u.TelegramID); err != nil {
+		if err := b.store.AddAutomationRule(ctx, domain.AutomationRule{ChatID: chatID, Event: event, Action: action}, u.TelegramID); err != nil {
 			b.edit(q, "Не удалось сохранить событие.", b.adminBackKeyboard())
 			return
 		}
 		b.edit(q, "Событие сохранено.", b.adminBackKeyboard())
 		return
 	}
-	b.sessions.set(u.TelegramID, session{Step: stepAdminAutomationValue, AdminChatID: q.Message.Chat.ID, AutomationEvent: event, AutomationAction: action})
+	b.sessions.set(u.TelegramID, session{Step: stepAdminAutomationValue, AdminChatID: chatID, AutomationEvent: event, AutomationAction: action})
 	b.edit(q, "Отправь текст. Переменные: {name}, {username}, {id}, {group}.", b.adminBackKeyboard())
 }
 func validAutomationEvent(event string) bool {
@@ -1687,11 +1743,17 @@ func messageHasLink(m *tgbotapi.Message) bool {
 	return false
 }
 func (b *Bot) runAutomations(ctx context.Context, m *tgbotapi.Message, u domain.User, event string) bool {
-	rules, err := b.store.AutomationRules(ctx, m.Chat.ID, event)
+	global, err := b.store.AutomationRules(ctx, 0, event)
 	if err != nil {
 		b.logErr(err)
 		return false
 	}
+	local, err := b.store.AutomationRules(ctx, m.Chat.ID, event)
+	if err != nil {
+		b.logErr(err)
+		return false
+	}
+	rules := append(global, local...)
 	stop := false
 	for _, rule := range rules {
 		if !rule.Enabled {
