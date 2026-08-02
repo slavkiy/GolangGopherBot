@@ -90,6 +90,25 @@ func TestRepositoryURLIsUnique(t *testing.T) {
 	}
 }
 
+func TestRegisteredChatType(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err = s.RegisterGroup(ctx, domain.RegisteredGroup{Name: "Feed", ChatID: -1001, ChatUsername: "feed", ChatType: "channel"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RegisteredGroupByChat(ctx, -1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ChatType != "channel" || got.Name != "Feed" {
+		t.Fatalf("unexpected registered channel: %+v", got)
+	}
+}
+
 func TestOwnerCanUpdateAndCloseProject(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
 	if err != nil {

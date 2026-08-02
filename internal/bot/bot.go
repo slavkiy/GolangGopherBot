@@ -76,6 +76,9 @@ func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) {
 	} else {
 		return
 	}
+	if from == nil {
+		return
+	}
 	u, err := b.store.UpsertUser(ctx, domain.User{TelegramID: from.ID, Username: from.UserName, FirstName: from.FirstName, LastName: from.LastName, LanguageCode: from.LanguageCode})
 	if err != nil {
 		b.logErr(err)
@@ -356,6 +359,27 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		} else {
 			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Пользователь разблокирован во всей сети.", nil)
 		}
+	case stepAdminRegisterChannel:
+		if m.Chat.Type != "private" {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Перешли запись из канала в личный диалог с ботом.", nil)
+			return
+		}
+		channel := forwardedChannel(m)
+		if channel == nil {
+			b.sendInThread(m.Chat.ID, 0, "Нужна пересланная запись из канала. Если канал запретил пересылку, временно разреши её в настройках канала.", nil)
+			return
+		}
+		if err := b.registerChannel(ctx, u, channel); err != nil {
+			b.sendInThread(m.Chat.ID, 0, "Не удалось зарегистрировать канал: "+esc(err.Error()), nil)
+			return
+		}
+		b.sessions.delete(u.TelegramID)
+		failures := b.syncNetworkAdmins(ctx)
+		if len(failures) > 0 {
+			b.sendInThread(m.Chat.ID, 0, "Канал зарегистрирован. Синхронизация продолжена по всей сети, но есть ошибки:\n"+esc(strings.Join(failures, "\n")), nil)
+		} else {
+			b.sendInThread(m.Chat.ID, 0, "Канал зарегистрирован, роли синхронизированы во всей сети.", nil)
+		}
 	}
 }
 
@@ -498,11 +522,11 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 		}
 	case "admsync":
 		if b.isOwner(u) {
-			failures := b.syncGroupAdmins(ctx, q.Message.Chat.ID)
+			failures := b.syncNetworkAdmins(ctx)
 			if len(failures) > 0 {
-				b.edit(q, "Telegram отказал: "+esc(strings.Join(failures, ", ")), b.adminBackKeyboard())
+				b.edit(q, "Синхронизация выполнена по всей сети. Ошибки:\n"+esc(strings.Join(failures, "\n")), b.adminBackKeyboard())
 			} else {
-				b.edit(q, "Синхронизация ролей завершена.", b.adminBackKeyboard())
+				b.edit(q, "Роли синхронизированы во всей сети.", b.adminBackKeyboard())
 			}
 		}
 	case "admsanctionask":
@@ -513,6 +537,15 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 	case "admregister":
 		if b.isOwner(u) {
 			b.registerGroupFromButton(ctx, u, q)
+		}
+	case "admchannel":
+		if b.isOwner(u) {
+			if q.Message.Chat.Type != "private" {
+				b.edit(q, "Регистрация канала запускается в личном диалоге с ботом.", b.adminBackKeyboard())
+				return
+			}
+			b.sessions.set(u.TelegramID, session{Step: stepAdminRegisterChannel})
+			b.edit(q, "Перешли сюда любую запись из канала. Бот возьмёт название и ID сам.", b.adminBackKeyboard())
 		}
 	case "admadd":
 		if b.isOwner(u) {
@@ -1088,11 +1121,11 @@ func (b *Bot) adminAction(ctx context.Context, u domain.User, m *tgbotapi.Messag
 		if !b.isOwner(u) {
 			return
 		}
-		failures := b.syncGroupAdmins(ctx, m.Chat.ID)
+		failures := b.syncNetworkAdmins(ctx)
 		if len(failures) > 0 {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Telegram отказал: "+esc(strings.Join(failures, ", ")), nil)
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Синхронизация выполнена по всей сети. Ошибки:\n"+esc(strings.Join(failures, "\n")), nil)
 		} else {
-			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Синхронизация ролей завершена.", nil)
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Роли синхронизированы во всей сети.", nil)
 		}
 	case "sanction":
 		if !b.isOwner(u) {
@@ -1224,7 +1257,7 @@ func (b *Bot) adminCategory(u domain.User, q *tgbotapi.CallbackQuery, category s
 	case "network":
 		title = "Сеть"
 		if b.isOwner(u) {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Регистрация группы", "admregister:start"), tgbotapi.NewInlineKeyboardButtonData("Тема проектов", "admadd:start")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Группы сети", "admgroup:list"), tgbotapi.NewInlineKeyboardButtonData("Синхронизация админов", "admsync:run")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить группу", "admsanctionask:show")))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Регистрация группы", "admregister:start"), tgbotapi.NewInlineKeyboardButtonData("Регистрация канала", "admchannel:start")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Тема проектов", "admadd:start"), tgbotapi.NewInlineKeyboardButtonData("Участники сети", "admgroup:list")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Синхронизация админов", "admsync:run")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить группу", "admsanctionask:show")))
 		}
 	case "moderation":
 		title = "Модерация"
@@ -1319,11 +1352,16 @@ func (b *Bot) adminGroups(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	}
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var text strings.Builder
-	text.WriteString("<b>Группы сети</b>\n")
+	text.WriteString("<b>Участники сети</b>\n")
 	if len(registered) == 0 {
 		text.WriteString("\nНет зарегистрированных групп.")
 	}
 	for _, g := range registered {
+		if g.ChatType == "channel" {
+			fmt.Fprintf(&text, "\n\nКанал: %s", esc(g.Name))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить "+shortButton(g.Name), fmt.Sprintf("admsanction:%d", g.ChatID))))
+			continue
+		}
 		route, configured := routeByChat[g.ChatID]
 		if configured {
 			fmt.Fprintf(&text, "\n\n%s\nЯзык: %s, тема: %d", esc(g.Name), esc(route.Language), route.ThreadID)
@@ -1566,6 +1604,74 @@ func (b *Bot) syncGroupAdmins(ctx context.Context, chatID int64) []string {
 	}
 	return failures
 }
+func (b *Bot) syncNetworkAdmins(ctx context.Context) []string {
+	chats, err := b.store.RegisteredGroups(ctx)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	if len(chats) == 0 {
+		return []string{"в сети нет зарегистрированных групп или каналов"}
+	}
+	var failures []string
+	for _, chat := range chats {
+		missing, checkErr := b.missingSyncRights(chat.ChatID, chat.ChatType)
+		if checkErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: проверка прав: %s", chat.Name, checkErr))
+			continue
+		}
+		if len(missing) > 0 {
+			failures = append(failures, fmt.Sprintf("%s: у бота нет %s", chat.Name, strings.Join(missing, ", ")))
+			continue
+		}
+		for _, failure := range b.syncGroupAdmins(ctx, chat.ChatID) {
+			failures = append(failures, chat.Name+": "+failure)
+		}
+	}
+	return failures
+}
+func (b *Bot) missingSyncRights(chatID int64, chatType string) ([]string, error) {
+	member, err := b.api.GetChatMember(tgbotapi.NewGetChatMember(chatID, b.api.Self.ID))
+	if err != nil {
+		return nil, err
+	}
+	if member.Status == "creator" {
+		return nil, nil
+	}
+	if member.Status != "administrator" {
+		return []string{"administrator"}, nil
+	}
+	var missing []string
+	if !member.CanPromoteMembers {
+		missing = append(missing, "promote_members")
+	}
+	if chatType == "channel" && !member.CanPostMessages {
+		missing = append(missing, "post_messages")
+	}
+	return missing, nil
+}
+func forwardedChannel(m *tgbotapi.Message) *tgbotapi.Chat {
+	if m == nil || m.ForwardOrigin == nil || m.ForwardOrigin.Type != tgbotapi.MessageOriginChannel {
+		return nil
+	}
+	return m.ForwardOrigin.Chat
+}
+func (b *Bot) registerChannel(ctx context.Context, u domain.User, channel *tgbotapi.Chat) error {
+	if channel == nil || channel.Type != "channel" {
+		return fmt.Errorf("пересланное сообщение не из канала")
+	}
+	missing, err := b.missingSyncRights(channel.ID, "channel")
+	if err != nil {
+		return fmt.Errorf("бот не видит канал или не добавлен в него: %w", err)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("боту не хватает прав: %s", strings.Join(missing, ", "))
+	}
+	name := strings.TrimSpace(channel.Title)
+	if name == "" {
+		name = strings.TrimPrefix(channel.UserName, "@")
+	}
+	return b.store.RegisterGroup(ctx, domain.RegisteredGroup{Name: name, ChatID: channel.ID, ChatUsername: channel.UserName, ChatType: "channel"}, u.TelegramID)
+}
 func (b *Bot) syncUserRole(ctx context.Context, u domain.User) []string {
 	groups, err := b.store.RegisteredGroups(ctx)
 	if err != nil {
@@ -1574,7 +1680,7 @@ func (b *Bot) syncUserRole(ctx context.Context, u domain.User) []string {
 	var failures []string
 	for _, group := range groups {
 		if err := b.applyRoleInChat(group.ChatID, u); err != nil {
-			failures = append(failures, group.Name)
+			failures = append(failures, group.Name+": "+err.Error())
 			b.logErr(fmt.Errorf("role in %s: %w", group.Name, err))
 		}
 	}

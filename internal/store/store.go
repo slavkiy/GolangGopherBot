@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_language_status ON projects(language, st
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,language TEXT NOT NULL UNIQUE,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',thread_id INTEGER NOT NULL,anti_spam INTEGER NOT NULL DEFAULT 0,spam_limit INTEGER NOT NULL DEFAULT 6,spam_window INTEGER NOT NULL DEFAULT 10,spam_action TEXT NOT NULL DEFAULT 'delete_warn',created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',chat_type TEXT NOT NULL DEFAULT 'supergroup',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
 	if err != nil {
 		return err
@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMEN
 		`ALTER TABLE network_groups ADD COLUMN spam_limit INTEGER NOT NULL DEFAULT 6`,
 		`ALTER TABLE network_groups ADD COLUMN spam_window INTEGER NOT NULL DEFAULT 10`,
 		`ALTER TABLE network_groups ADD COLUMN spam_action TEXT NOT NULL DEFAULT 'delete_warn'`,
+		`ALTER TABLE registered_groups ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'supergroup'`,
 	} {
 		if _, alterErr := s.db.Exec(statement); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
@@ -332,16 +333,19 @@ func (s *Store) CustomCommand(ctx context.Context, name string) (domain.CustomCo
 	return c, err
 }
 func (s *Store) RegisterGroup(ctx context.Context, g domain.RegisteredGroup, by int64) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO registered_groups(name,chat_id,chat_username,registered_by) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET name=excluded.name,chat_username=excluded.chat_username`, g.Name, g.ChatID, g.ChatUsername, by)
+	if g.ChatType == "" {
+		g.ChatType = "supergroup"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO registered_groups(name,chat_id,chat_username,chat_type,registered_by) VALUES(?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET name=excluded.name,chat_username=excluded.chat_username,chat_type=excluded.chat_type`, g.Name, g.ChatID, g.ChatUsername, g.ChatType, by)
 	return err
 }
 func (s *Store) RegisteredGroupByChat(ctx context.Context, chatID int64) (domain.RegisteredGroup, error) {
 	var g domain.RegisteredGroup
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,chat_id,chat_username FROM registered_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,chat_id,chat_username,chat_type FROM registered_groups WHERE chat_id=?`, chatID).Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername, &g.ChatType)
 	return g, err
 }
 func (s *Store) RegisteredGroups(ctx context.Context) ([]domain.RegisteredGroup, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,chat_id,chat_username FROM registered_groups ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,chat_id,chat_username,chat_type FROM registered_groups ORDER BY chat_type,name`)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +353,7 @@ func (s *Store) RegisteredGroups(ctx context.Context) ([]domain.RegisteredGroup,
 	var out []domain.RegisteredGroup
 	for rows.Next() {
 		var g domain.RegisteredGroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.ChatID, &g.ChatUsername, &g.ChatType); err != nil {
 			return nil, err
 		}
 		out = append(out, g)

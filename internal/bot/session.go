@@ -20,6 +20,7 @@ const (
 	stepAdminCommand
 	stepAdminBlock
 	stepAdminUnblock
+	stepAdminRegisterChannel
 )
 
 type session struct {

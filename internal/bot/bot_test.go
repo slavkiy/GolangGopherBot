@@ -7,6 +7,8 @@ import (
 	"golanggopherbot/internal/config"
 	"golanggopherbot/internal/domain"
 	gh "golanggopherbot/internal/github"
+
+	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
 
 func TestFormatProjectEscapesHTML(t *testing.T) {
@@ -107,5 +109,16 @@ func TestButtonOwnership(t *testing.T) {
 	}
 	if !b.canUseButtons(-1001, 43, 8) {
 		t.Fatal("unbound public buttons were blocked")
+	}
+}
+
+func TestForwardedChannel(t *testing.T) {
+	channel := &tgbotapi.Chat{ID: -1001, Type: "channel", Title: "Feed"}
+	m := &tgbotapi.Message{ForwardOrigin: &tgbotapi.MessageOrigin{Type: tgbotapi.MessageOriginChannel, Chat: channel}}
+	if got := forwardedChannel(m); got != channel {
+		t.Fatalf("unexpected channel: %+v", got)
+	}
+	if got := forwardedChannel(&tgbotapi.Message{}); got != nil {
+		t.Fatalf("accepted regular message: %+v", got)
 	}
 }

@@ -28,6 +28,7 @@ type RegisteredGroup struct {
 	Name         string
 	ChatID       int64
 	ChatUsername string
+	ChatType     string
 }
 type CustomCommand struct{ Name, Response string }
 
