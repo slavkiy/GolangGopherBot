@@ -112,15 +112,18 @@ func (b *Bot) handleOwnMembership(change *tgbotapi.ChatMemberUpdated) {
 	if change.Chat.Type == "private" || status == "left" || status == "kicked" {
 		return
 	}
-	missing, err := b.missingBotRights(change.Chat.ID)
-	if err != nil {
-		return
-	}
-	if len(missing) == 0 {
-		return
-	}
-	b.send(change.Chat.ID, "Для работы сети боту нужны все административные права, кроме анонимности. Не хватает: "+esc(strings.Join(missing, ", "))+". Бот покидает группу.", nil)
-	_, _ = b.api.MakeRequest("leaveChat", tgbotapi.Params{"chat_id": strconv.FormatInt(change.Chat.ID, 10)})
+	chatID := change.Chat.ID
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		<-timer.C
+		missing, err := b.missingBotRights(chatID)
+		if err != nil || len(missing) == 0 {
+			return
+		}
+		b.send(chatID, "Для работы сети боту нужны административные права. Не хватает: "+esc(strings.Join(missing, ", "))+". Бот покидает группу.", nil)
+		_, _ = b.api.MakeRequest("leaveChat", tgbotapi.Params{"chat_id": strconv.FormatInt(chatID, 10)})
+	}()
 }
 
 func (b *Bot) command(ctx context.Context, u domain.User, m *tgbotapi.Message) {
@@ -1225,10 +1228,20 @@ func (b *Bot) missingBotRights(chatID int64) ([]string, error) {
 	if member.Status != "administrator" {
 		return []string{"administrator"}, nil
 	}
+	chat, err := b.api.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: chatID}})
+	if err != nil {
+		return nil, err
+	}
 	checks := []struct {
 		name string
 		ok   bool
-	}{{"change_info", member.CanChangeInfo}, {"delete_messages", member.CanDeleteMessages}, {"manage_video_chats", member.CanManageVideoChats}, {"restrict_members", member.CanRestrictMembers}, {"invite_users", member.CanInviteUsers}, {"pin_messages", member.CanPinMessages}, {"promote_members", member.CanPromoteMembers}, {"manage_topics", member.CanManageTopics}}
+	}{{"change_info", member.CanChangeInfo}, {"delete_messages", member.CanDeleteMessages}, {"restrict_members", member.CanRestrictMembers}, {"invite_users", member.CanInviteUsers}, {"pin_messages", member.CanPinMessages}, {"promote_members", member.CanPromoteMembers}}
+	if chat.IsForum {
+		checks = append(checks, struct {
+			name string
+			ok   bool
+		}{"manage_topics", member.CanManageTopics})
+	}
 	var missing []string
 	for _, check := range checks {
 		if !check.ok {
