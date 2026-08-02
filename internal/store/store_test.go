@@ -133,6 +133,24 @@ func TestAutomationRules(t *testing.T) {
 	}
 }
 
+func TestNetworkSetting(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if got := s.NetworkSetting(ctx, "service_delete_seconds", "30"); got != "30" {
+		t.Fatalf("unexpected fallback: %s", got)
+	}
+	if err = s.SetNetworkSetting(ctx, "service_delete_seconds", "60"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.NetworkSetting(ctx, "service_delete_seconds", "30"); got != "60" {
+		t.Fatalf("unexpected setting: %s", got)
+	}
+}
+
 func TestOwnerCanUpdateAndCloseProject(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "bot.db"))
 	if err != nil {

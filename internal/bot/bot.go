@@ -395,6 +395,16 @@ func (b *Bot) input(ctx context.Context, u domain.User, m *tgbotapi.Message, s s
 		}
 		b.sessions.delete(u.TelegramID)
 		b.sendInThread(m.Chat.ID, m.MessageThreadID, "Событие сохранено.", nil)
+	case stepAdminBroadcastText:
+		text := strings.TrimSpace(m.Text)
+		if text == "" || len([]rune(text)) > 3500 {
+			b.sendInThread(m.Chat.ID, m.MessageThreadID, "Текст должен быть от 1 до 3500 символов.", nil)
+			return
+		}
+		s.BroadcastText, s.Step = text, stepAdminBroadcastConfirm
+		b.sessions.set(u.TelegramID, s)
+		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Отправить", "admbroadcastsend:run"), tgbotapi.NewInlineKeyboardButtonData("Отмена", "admmenu:show")))
+		b.sendOwnedInThread(m.Chat.ID, m.MessageThreadID, "<b>Предпросмотр рассылки</b>\nПолучатели: "+broadcastScopeName(s.BroadcastScope)+"\n\n"+esc(text), &kb, u.TelegramID)
 	}
 }
 
@@ -561,6 +571,41 @@ func (b *Bot) callback(ctx context.Context, u domain.User, q *tgbotapi.CallbackQ
 			}
 			b.sessions.set(u.TelegramID, session{Step: stepAdminRegisterChannel})
 			b.edit(q, "Перешли сюда любую запись из канала. Бот возьмёт название и ID сам.", b.adminBackKeyboard())
+		}
+	case "admbroadcast":
+		if b.isOwner(u) {
+			b.broadcastScopeMenu(q)
+		}
+	case "admbroadcastscope":
+		if b.isOwner(u) && validBroadcastScope(value) {
+			b.sessions.set(u.TelegramID, session{Step: stepAdminBroadcastText, BroadcastScope: value})
+			b.edit(q, "Отправь текст рассылки (до 3500 символов). Перед отправкой будет предпросмотр.", b.adminBackKeyboard())
+		}
+	case "admbroadcastsend":
+		if b.isOwner(u) {
+			s, ok := b.sessions.get(u.TelegramID)
+			if !ok || s.Step != stepAdminBroadcastConfirm {
+				return
+			}
+			b.sessions.delete(u.TelegramID)
+			sent, failures := b.sendBroadcast(ctx, s.BroadcastScope, s.BroadcastText)
+			result := fmt.Sprintf("Рассылка завершена. Отправлено: %d.", sent)
+			if len(failures) > 0 {
+				result += "\nОшибки:\n" + esc(strings.Join(failures, "\n"))
+			}
+			b.edit(q, result, b.adminBackKeyboard())
+		}
+	case "admsettings":
+		if b.isOwner(u) {
+			b.networkSettings(ctx, q)
+		}
+	case "admautodelete":
+		if b.isOwner(u) {
+			seconds, err := strconv.Atoi(value)
+			if err == nil && (seconds == 0 || seconds == 15 || seconds == 30 || seconds == 60 || seconds == 120) {
+				_ = b.store.SetNetworkSetting(ctx, "service_delete_seconds", value)
+			}
+			b.networkSettings(ctx, q)
 		}
 	case "admevents":
 		if b.canModerate(u) {
@@ -1319,6 +1364,7 @@ func (b *Bot) adminCategory(u domain.User, q *tgbotapi.CallbackQuery, category s
 		title = "Сеть"
 		if b.isOwner(u) {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Регистрация группы", "admregister:start"), tgbotapi.NewInlineKeyboardButtonData("Регистрация канала", "admchannel:start")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Тема проектов", "admadd:start"), tgbotapi.NewInlineKeyboardButtonData("Участники сети", "admgroup:list")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Синхронизация админов", "admsync:run")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Исключить группу", "admsanctionask:show")))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Массовая рассылка", "admbroadcast:show"), tgbotapi.NewInlineKeyboardButtonData("Настройки сети", "admsettings:show")))
 		}
 	case "moderation":
 		title = "Модерация"
@@ -1400,6 +1446,66 @@ func (b *Bot) deleteAdminInput(m *tgbotapi.Message) {
 func (b *Bot) adminBackKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admmenu:show")))
 	return &kb
+}
+func (b *Bot) broadcastScopeMenu(q *tgbotapi.CallbackQuery) {
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Вся сеть", "admbroadcastscope:all")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Только группы", "admbroadcastscope:groups"), tgbotapi.NewInlineKeyboardButtonData("Только каналы", "admbroadcastscope:channels")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:network")),
+	)
+	b.edit(q, "<b>Массовая рассылка</b>\n\nВыбери получателей. Сообщения рассылки не удаляются автоматически.", &kb)
+}
+func validBroadcastScope(scope string) bool {
+	return scope == "all" || scope == "groups" || scope == "channels"
+}
+func broadcastScopeName(scope string) string {
+	return map[string]string{"all": "вся сеть", "groups": "только группы", "channels": "только каналы"}[scope]
+}
+func (b *Bot) sendBroadcast(ctx context.Context, scope, text string) (int, []string) {
+	chats, err := b.store.RegisteredGroups(ctx)
+	if err != nil {
+		return 0, []string{err.Error()}
+	}
+	sent := 0
+	var failures []string
+	for _, chat := range chats {
+		isChannel := chat.ChatType == "channel"
+		if scope == "groups" && isChannel || scope == "channels" && !isChannel {
+			continue
+		}
+		msg := tgbotapi.NewMessage(chat.ChatID, esc(text))
+		msg.ParseMode = "HTML"
+		msg.LinkPreviewOptions = tgbotapi.LinkPreviewOptions{IsDisabled: true}
+		if _, sendErr := b.api.Send(msg); sendErr != nil {
+			failures = append(failures, chat.Name+": "+sendErr.Error())
+			b.logErr(fmt.Errorf("broadcast to %s: %w", chat.Name, sendErr))
+			continue
+		}
+		sent++
+	}
+	return sent, failures
+}
+func (b *Bot) networkSettings(ctx context.Context, q *tgbotapi.CallbackQuery) {
+	chats, _ := b.store.RegisteredGroups(ctx)
+	groups, channels := 0, 0
+	for _, chat := range chats {
+		if chat.ChatType == "channel" {
+			channels++
+		} else {
+			groups++
+		}
+	}
+	seconds := b.store.NetworkSetting(ctx, "service_delete_seconds", "30")
+	deleteText := seconds + " сек"
+	if seconds == "0" {
+		deleteText = "выключено"
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Не удалять", "admautodelete:0"), tgbotapi.NewInlineKeyboardButtonData("15 сек", "admautodelete:15"), tgbotapi.NewInlineKeyboardButtonData("30 сек", "admautodelete:30")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("60 сек", "admautodelete:60"), tgbotapi.NewInlineKeyboardButtonData("120 сек", "admautodelete:120")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Назад", "admcat:network")),
+	)
+	b.edit(q, fmt.Sprintf("<b>Настройки сети</b>\n\nГрупп: %d\nКаналов: %d\nАвтоудаление служебных сообщений: %s", groups, channels, deleteText), &kb)
 }
 func (b *Bot) automationScopeMenu(u domain.User, q *tgbotapi.CallbackQuery) {
 	rows := [][]tgbotapi.InlineKeyboardButton{}
@@ -2067,11 +2173,20 @@ func (b *Bot) scheduleDelete(chatID int64, messageID int) {
 		return
 	}
 	key := fmt.Sprintf("%d:%d", chatID, messageID)
+	seconds, err := strconv.Atoi(b.store.NetworkSetting(context.Background(), "service_delete_seconds", "30"))
+	if err != nil || seconds < 0 || seconds > 3600 {
+		seconds = 30
+	}
 	b.deleteMu.Lock()
 	if timer := b.deleteTimers[key]; timer != nil {
 		timer.Stop()
+		delete(b.deleteTimers, key)
 	}
-	b.deleteTimers[key] = time.AfterFunc(30*time.Second, func() {
+	if seconds == 0 {
+		b.deleteMu.Unlock()
+		return
+	}
+	b.deleteTimers[key] = time.AfterFunc(time.Duration(seconds)*time.Second, func() {
 		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, messageID))
 		b.deleteMu.Lock()
 		delete(b.deleteTimers, key)

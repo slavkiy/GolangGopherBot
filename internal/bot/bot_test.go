@@ -131,3 +131,14 @@ func TestMessageHasLink(t *testing.T) {
 		t.Fatal("regular entity detected as link")
 	}
 }
+
+func TestBroadcastScopes(t *testing.T) {
+	for _, scope := range []string{"all", "groups", "channels"} {
+		if !validBroadcastScope(scope) || broadcastScopeName(scope) == "" {
+			t.Fatalf("invalid scope %s", scope)
+		}
+	}
+	if validBroadcastScope("users") {
+		t.Fatal("accepted unsupported scope")
+	}
+}

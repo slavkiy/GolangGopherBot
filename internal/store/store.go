@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS network_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,n
 CREATE TABLE IF NOT EXISTS custom_commands(name TEXT PRIMARY KEY,response TEXT NOT NULL,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS registered_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,chat_id INTEGER NOT NULL UNIQUE,chat_username TEXT NOT NULL DEFAULT '',chat_type TEXT NOT NULL DEFAULT 'supergroup',registered_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS automation_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER NOT NULL,event TEXT NOT NULL,action TEXT NOT NULL,value TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,created_by INTEGER NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS network_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `)
 	if err != nil {
 		return err
@@ -362,6 +363,17 @@ func (s *Store) AutomationRules(ctx context.Context, chatID int64, event string)
 }
 func (s *Store) RemoveAutomationRule(ctx context.Context, id, chatID int64) error {
 	return requireChanged(s.db.ExecContext(ctx, `DELETE FROM automation_rules WHERE id=? AND chat_id=?`, id, chatID))
+}
+func (s *Store) NetworkSetting(ctx context.Context, key, fallback string) string {
+	var value string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM network_settings WHERE key=?`, key).Scan(&value); err != nil {
+		return fallback
+	}
+	return value
+}
+func (s *Store) SetNetworkSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO network_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`, key, value)
+	return err
 }
 func (s *Store) RegisterGroup(ctx context.Context, g domain.RegisteredGroup, by int64) error {
 	if g.ChatType == "" {
